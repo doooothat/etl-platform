@@ -5,7 +5,10 @@ persistence:
 service:
   type: LoadBalancer
   port: 9000
-  consolePort: 9001
+
+consoleService:
+  type: LoadBalancer
+  port: 9001
 
 # Root credentials
 rootUser: admin
