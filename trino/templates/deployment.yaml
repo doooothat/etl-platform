@@ -1,0 +1,40 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "trino.fullname" . }}
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: {{ include "trino.name" . }}
+  template:
+    metadata:
+      labels:
+        app: {{ include "trino.name" . }}
+    spec:
+      containers:
+        - name: trino
+          image: "{{ .Values.image.repository }}:{{ .Values.image.tag }}"
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          ports:
+            - containerPort: 8080
+          volumeMounts:
+            - name: config
+              mountPath: /etc/trino/jvm.config
+              subPath: jvm.config
+            - name: config
+              mountPath: /etc/trino/config.properties
+              subPath: config.properties
+            - name: catalog
+              mountPath: /etc/trino/catalog/iceberg.properties
+              subPath: catalog-iceberg.properties
+            - name: catalog
+              mountPath: /etc/trino/catalog/iceberg_dev.properties
+              subPath: catalog-iceberg-dev.properties
+      volumes:
+        - name: config
+          configMap:
+            name: {{ include "trino.fullname" . }}-config
+        - name: catalog
+          configMap:
+            name: {{ include "trino.fullname" . }}-config

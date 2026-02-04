@@ -1,0 +1,102 @@
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: trino
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: trino-config
+  namespace: trino
+data:
+  jvm.config: |
+    -server
+    -Xmx2G
+    -XX:+UseG1GC
+    -XX:G1HeapRegionSize=32M
+    -XX:+ExplicitGCInvokesConcurrent
+    -XX:+HeapDumpOnOutOfMemoryError
+    -XX:+ExitOnOutOfMemoryError
+  config.properties: |
+    coordinator=true
+    node-scheduler.include-coordinator=true
+    http-server.http.port=8080
+    discovery.uri=http://localhost:8080
+  catalog-iceberg.properties: |
+    connector.name=iceberg
+    iceberg.catalog.type=rest
+    iceberg.rest-catalog.uri=http://nessie.nessie.svc.cluster.local:19120/iceberg/main
+    fs.native-s3.enabled=true
+    s3.endpoint=http://minio.minio.svc.cluster.local:9000
+    s3.path-style-access=true
+    s3.aws-access-key=admin
+    s3.aws-secret-key=password
+    s3.region=us-east-1
+  catalog-iceberg-dev.properties: |
+    connector.name=iceberg
+    iceberg.catalog.type=rest
+    iceberg.rest-catalog.uri=http://nessie.nessie.svc.cluster.local:19120/iceberg/dev
+    fs.native-s3.enabled=true
+    s3.endpoint=http://minio.minio.svc.cluster.local:9000
+    s3.path-style-access=true
+    s3.aws-access-key=admin
+    s3.aws-secret-key=password
+    s3.region=us-east-1
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: trino-coordinator
+  namespace: trino
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: trino
+  template:
+    metadata:
+      labels:
+        app: trino
+    spec:
+      containers:
+        - name: trino
+          image: trinodb/trino:435
+          ports:
+            - containerPort: 8080
+          volumeMounts:
+            - name: config
+              mountPath: /etc/trino/jvm.config
+              subPath: jvm.config
+            - name: config
+              mountPath: /etc/trino/config.properties
+              subPath: config.properties
+            - name: catalog
+              mountPath: /etc/trino/catalog/iceberg.properties
+              subPath: catalog-iceberg.properties
+            - name: catalog
+              mountPath: /etc/trino/catalog/iceberg_dev.properties
+              subPath: catalog-iceberg-dev.properties
+      volumes:
+        - name: config
+          configMap:
+            name: trino-config
+        - name: catalog
+          configMap:
+            name: trino-config
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: trino
+  namespace: trino
+spec:
+  type: LoadBalancer
+  ports:
+    - port: 8080
+      targetPort: 8080
+      name: http
+    - port: 18081
+      targetPort: 8080
+      name: dbeaver
+  selector:
+    app: trino

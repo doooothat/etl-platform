@@ -1,0 +1,104 @@
+# Superset Clean Installation (ARM Mac)
+# Only SQLite Examples, Postgres for Meta (No Persistence for test)
+
+runAsUser: 0
+
+bootstrapScript: |
+  #!/bin/bash
+  set -e
+  echo "--- Bootstrap Start ---"
+  if [ -f /app/.venv/bin/activate ]; then
+    . /app/.venv/bin/activate
+  fi
+  echo "Installing psycopg2-binary..."
+  pip install psycopg2-binary --target /app/.venv/lib/python3.10/site-packages
+
+  # [변경] 전용 분석 DB(postgres-analytics)에 예제 데이터를 로드하는 로직
+  if echo $(hostname) | grep -q "superset" && ! echo $(hostname) | grep -qE "worker|init"; then
+    echo "Detected Webserver Pod. Scheduling example data load to Remote Analytics DB..."
+    (
+      sleep 45 # 분석 DB가 뜰 때까지 충분히 대기
+      echo "Loading example data into Remote PostgreSQL (postgres-analytics-postgresql)..."
+      # SQLite가 아닌 SQLALCHEMY_EXAMPLES_URI에 설정된 DB로 데이터 로드
+      superset load_examples --force
+      echo "Example data migrated to postgres-analytics successfully!"
+    ) &
+  fi
+  echo "--- Bootstrap End ---"
+
+configOverrides:
+  secret: |
+    SECRET_KEY = 'fresh-start-key'
+  db_connection: |
+    SQLALCHEMY_DATABASE_URI = 'postgresql://superset:superset@superset-postgresql:5432/superset'
+    # 전용 분석 DB를 샘플 데이터 저장소로 지정 (public 스키마 사용)
+    SQLALCHEMY_EXAMPLES_URI = 'postgresql://analytics:analytics@postgres-analytics-postgresql.analytics.svc.cluster.local:5433/analytics'
+  sqllab_config: |
+    # SQL Lab 및 로컬 개발용 보안 설정
+    WTF_CSRF_ENABLED = False
+    TALISMAN_CONFIG = {"force_https": False, "frame_options": "ALLOWFROM", "content_security_policy": None}
+
+    # Feature Flags
+    FEATURE_FLAGS = {
+        "SQLLAB_BACKEND_PERSISTENCE": True,
+        "SQL_EXPLORER": True,
+        "EMBEDDED_SUPERSET": True,
+    }
+
+postgresql:
+  enabled: true
+  image:
+    registry: docker.io
+    repository: bitnami/postgresql
+    tag: "latest"
+  auth:
+    username: superset
+    password: superset
+    database: superset
+  primary:
+    persistence:
+      enabled: false # Ensure absolutely clean start every time for this test
+    readinessProbe: { enabled: false }
+    livenessProbe: { enabled: false }
+    startupProbe: { enabled: false }
+    podSecurityContext: { enabled: false }
+    containerSecurityContext: { enabled: false }
+  volumePermissions: { enabled: false }
+
+redis:
+  enabled: true
+  image:
+    registry: docker.io
+    repository: bitnami/redis
+    tag: "latest"
+  auth: { enabled: false }
+  master:
+    persistence:
+      enabled: false
+    podSecurityContext: { enabled: false }
+    containerSecurityContext: { enabled: false }
+
+init:
+  initContainers: [] # Bypass hang
+  createAdmin: true
+  adminUser:
+    username: admin
+    firstname: Superset
+    lastname: Admin
+    email: admin@superset.com
+    password: admin
+  initDb: true
+  loadExamples: true # This will load into local SQLite
+  command:
+    - "/bin/sh"
+    - "-c"
+    - ". {{ .Values.configMountPath }}/superset_bootstrap.sh; . {{ .Values.configMountPath }}/superset_init.sh"
+
+service:
+  type: LoadBalancer
+  port: 8088
+  nodePort:
+    http: null
+
+ingress:
+  enabled: false

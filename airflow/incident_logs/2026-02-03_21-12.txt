@@ -1,0 +1,35 @@
+# 장애 기록 (Incident Report) - 2026-02-03 21:12
+
+## 1. 개요
+*   **일시**: 2026년 2월 3일 20:55 ~ 21:11 (KST)
+*   **장소**: /Users/smylere/work/airflow (로컬 워크스페이스)
+*   **대상 서비스**: Apache Airflow Helm Chart Deployment
+
+## 2. 발생한 장애 현상 및 타임라인
+1.  **기동 시도 실패 (20:55)**: 원본 디렉토리에서 `helm install` 시도 중 에러 발생.
+    *   에러: `Error: lstat /Users/smylere/work/airflow/.DS_Store: operation not permitted`
+2.  **네임스페이스 충돌 (21:05)**: 재설치 시도 중 네임스페이스 종료 지연 발생.
+    *   에러: `unable to create new content in namespace airflow because it is being terminated`
+3.  **KEDA CRD 부재 (21:10)**: 네임스페이스 정리 후 재설치 시 KEDA 관련 리소스 생성 실패.
+    *   에러: `the server could not find the requested resource (patch scaledobjects.keda.sh airflow-worker)`
+
+## 3. 근본 원인 (Root Cause) 분석
+1.  **macOS 파일 권한 이슈 (OS Level)**:
+    *   Helm이 차트 디렉토리를 로드할 때 `.DS_Store` 및 `__pycache__`와 같은 시스템/캐시 파일의 `lstat` 권한을 확보하지 못함. macOS 보안 정책 및 파일 시스템 보호 기능으로 인해 Helm의 파일 스캔 시 차단됨.
+2.  **네임스페이스 자원 정리 고립 (Kubernetes Level)**:
+    *   이전 배포 시 생성된 KEDA `ScaledObject` 리소스에 `finalizer`가 걸려 있었으나, 삭제 과정에서 KEDA 컨트롤러와의 통신이 원활하지 않아(혹은 부재하여) 리소스가 미삭제 상태로 남음.
+    *   이로 인해 부모 리소스인 `airflow` 네임스페이스가 무한 `Terminating` 상태에 빠짐.
+3.  **환경 미일치 (Configuration Level)**:
+    *   `custom-values.yaml`에는 KEDA 오토스케일링이 활성화되어 있었으나, 현재 로컬 클러스터(OrbStack K8s)에는 KEDA 오퍼레이터 및 관련 CRD가 설치되어 있지 않아 리소스 정의가 불가능함.
+
+## 4. 해결 방법 (Resolution)
+1.  **파일 접근 우회**: 
+    *   문제가 되는 시스템 파일을 제외하고 `tar`로 패키징하여 임시 파일(`/tmp/airflow-chart.tgz`)을 소스로 사용함으로써 Helm의 디렉토리 스캔 오류를 회피함.
+2.  **네임스페이스 강제 제거**: 
+    *   남아있는 `ScaledObject`의 파이널라이저를 강제로 `null` 패치하여 제거.
+    *   쿠버네티스 API의 `/finalize` 엔드포인트를 직접 호출하여 `spec.finalizers`를 비움으로써 `Terminating` 상태를 강제 종료.
+3.  **설정 오버라이드**:
+    *   기동 시 `--set workers.keda.enabled=false` 옵션을 통해 클러스터에 부재한 KEDA 관련 구성을 명시적으로 끔.
+
+## 5. 최종 상태
+*   `airflow` 네임스페이스 재생성 및 모든 Pod(PostgreSQL, Redis, Scheduler, Webserver 등 총 8개) 정상 기동 확인.

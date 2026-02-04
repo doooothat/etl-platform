@@ -1,0 +1,56 @@
+# Spark Operator Configuration (Kubeflow)
+# https://github.com/kubeflow/spark-operator
+
+# 0. Global Image Settings (Local Image Only)
+image:
+  registry: ghcr.io
+  repository: kubeflow/spark-operator/controller
+  tag: "2.4.0"
+  pullPolicy: IfNotPresent
+
+# 1. Controller Settings
+controller:
+  replicas: 1
+  # 리소스 제한 (로컬 환경 맞춤)
+  resources:
+    limits:
+      cpu: 200m
+      memory: 512Mi
+    requests:
+      cpu: 100m
+      memory: 256Mi
+
+  # Webhook 활성화 (SparkApplication 검증/변조용)
+  webhook:
+    enable: true
+
+# 2. Spark Job Namespaces
+spark:
+  # Spark Operator가 감시할 네임스페이스 목록
+  # 여기에 'spark'를 추가해야 해당 네임스페이스의 작업을 관리함
+  jobNamespaces:
+    - "spark"
+    - "airflow"
+    - "default"
+
+  # Spark Job 실행 시 사용할 ServiceAccount 자동 생성
+  serviceAccount:
+    create: true
+    name: "spark-operator-sa"
+
+# 3. Webhook Settings
+webhook:
+  enable: true
+  replicas: 1
+  resources:
+    limits:
+      cpu: 200m
+      memory: 512Mi
+    requests:
+      cpu: 100m
+      memory: 256Mi
+
+# 4. Metrics
+prometheus:
+  metrics:
+    enable: false # 로컬에서는 일단 꺼둠 (필요시 켬)

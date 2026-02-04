@@ -1,0 +1,71 @@
+# Custom values for local Kubernetes deployment (Development Mode)
+postgresql:
+  enabled: true
+  image:
+    registry: docker.io
+    repository: bitnami/postgresql
+    tag: "latest"
+  auth:
+    username: airflow
+    password: airflow
+    database: airflow
+  primary:
+    persistence:
+      enabled: false # Correct path for bitnami/postgresql 13.x
+    podSecurityContext:
+      enabled: false
+    containerSecurityContext:
+      enabled: false
+  volumePermissions:
+    enabled: false
+
+# Redis enabled and persistence disabled
+redis:
+  enabled: true
+  persistence:
+    enabled: false
+
+logs:
+  persistence:
+    enabled: false
+
+workers:
+  persistence:
+    enabled: false
+  # KEDA 오토스케일링 활성화
+  keda:
+    enabled: true
+    pollingInterval: 5 # 5초마다 Redis 검사 (기본 30초는 너무 느림)
+    cooldownPeriod: 30 # 일 끝나고 30초 뒤에 Worker 축소
+    minReplicaCount: 1 # 최소 1명은 대기
+    maxReplicaCount: 5 # 최대 5명까지만 채용 (PC 안 터지게)
+
+triggerer:
+  persistence:
+    enabled: false
+
+dagProcessor:
+  enabled: true
+
+migrateDatabaseJob:
+  enabled: true
+
+# -------------------------------------------------------------
+# 로컬 개발 환경 설정: HostPath Mount
+# 로컬의 /Users/smylere/work/etl-platform/airflow/dags 폴더를 컨테이너의 /opt/airflow/dags로 직접 연결
+# -------------------------------------------------------------
+volumes:
+  - name: dags-local
+    hostPath:
+      path: /Users/smylere/work/etl-platform/airflow/dags
+      type: Directory
+
+volumeMounts:
+  - name: dags-local
+    mountPath: /opt/airflow/dags
+    readOnly: false # 필요 시 Airflow가 파일을 쓸 수 있도록 (Logs 등은 별도지만, 여기선 일단 false)
+
+# 외부 노출 설정: Orbstack에서 자동으로 localhost:8080에 연결하도록 LoadBalancer 설정
+apiServer:
+  service:
+    type: LoadBalancer

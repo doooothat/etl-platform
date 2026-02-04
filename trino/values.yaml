@@ -1,0 +1,29 @@
+image:
+  repository: trinodb/trino
+  tag: "435"
+  pullPolicy: IfNotPresent
+
+service:
+  type: LoadBalancer
+  port: 18080 # Port 18080 to avoid conflict with Airflow
+
+nessie:
+  uri: "http://nessie.nessie.svc.cluster.local:19120"
+  warehouse: "s3a://iceberg-data/"
+
+minio:
+  endpoint: "http://minio.minio.svc.cluster.local:9000"
+  accessKey: "admin"
+  secretKey: "password"
+  region: "us-east-1"
+
+jvm:
+  maxHeapSize: "2G"
+
+resources:
+  requests:
+    cpu: "500m"
+    memory: "1Gi"
+  limits:
+    cpu: "1"
+    memory: "2Gi"

@@ -1,0 +1,38 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "trino.fullname" . }}-config
+data:
+  jvm.config: |
+    -server
+    -Xmx{{ .Values.jvm.maxHeapSize }}
+    -XX:+UseG1GC
+    -XX:G1HeapRegionSize=32M
+    -XX:+ExplicitGCInvokesConcurrent
+    -XX:+HeapDumpOnOutOfMemoryError
+    -XX:+ExitOnOutOfMemoryError
+  config.properties: |
+    coordinator=true
+    node-scheduler.include-coordinator=true
+    http-server.http.port=8080
+    discovery.uri=http://localhost:8080
+  catalog-iceberg.properties: |
+    connector.name=iceberg
+    iceberg.catalog.type=rest
+    iceberg.rest-catalog.uri={{ .Values.nessie.uri }}/iceberg/main
+    fs.native-s3.enabled=true
+    s3.endpoint={{ .Values.minio.endpoint }}
+    s3.path-style-access=true
+    s3.aws-access-key={{ .Values.minio.accessKey }}
+    s3.aws-secret-key={{ .Values.minio.secretKey }}
+    s3.region={{ .Values.minio.region }}
+  catalog-iceberg-dev.properties: |
+    connector.name=iceberg
+    iceberg.catalog.type=rest
+    iceberg.rest-catalog.uri={{ .Values.nessie.uri }}/iceberg/dev
+    fs.native-s3.enabled=true
+    s3.endpoint={{ .Values.minio.endpoint }}
+    s3.path-style-access=true
+    s3.aws-access-key={{ .Values.minio.accessKey }}
+    s3.aws-secret-key={{ .Values.minio.secretKey }}
+    s3.region={{ .Values.minio.region }}

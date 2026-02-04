@@ -1,0 +1,29 @@
+# Postgres-Analytics Custom Values
+# This DB stores the business/example data for Superset, separating it from Metadata DBs.
+
+image:
+  registry: docker.io
+  repository: bitnami/postgresql
+  tag: "latest"
+  pullPolicy: IfNotPresent
+
+auth:
+  username: analytics
+  password: analytics
+  database: analytics
+
+primary:
+  service:
+    type: LoadBalancer
+    ports:
+      postgresql: 5433
+  persistence:
+    enabled: false
+  podSecurityContext:
+    enabled: false
+  containerSecurityContext:
+    enabled: false
+  resourcesPreset: "none"
+
+volumePermissions:
+  enabled: false

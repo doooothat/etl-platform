@@ -1,0 +1,27 @@
+# Ephemeral MinIO Configuration for Local Dev
+mode: standalone
+persistence:
+  enabled: false
+service:
+  type: LoadBalancer
+  port: 9000
+  consolePort: 9001
+
+# Root credentials
+rootUser: admin
+rootPassword: password
+
+# Auto-create bucket for Iceberg
+buckets:
+  - name: iceberg-data
+    policy: none
+    purge: false
+
+# Resource limits (The chart default is 16Gi, which is too high for local)
+resources:
+  requests:
+    cpu: 100m
+    memory: 256Mi
+  limits:
+    cpu: 200m
+    memory: 512Mi
