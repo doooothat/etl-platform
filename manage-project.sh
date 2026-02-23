@@ -90,6 +90,9 @@ case "$1" in
     start)
         scale_workloads 1
         echo -e "\n\033[1;32mProject workloads are scaling up.\033[0m"
+        echo -e "\033[1;33mNOTE: Data is NOT persistent. After services are READY, please run:\033[0m"
+        echo -e "\033[1;36m      ./init_data.sh\033[0m"
+        echo -e "\033[1;33mto restore Iceberg tables and sample data.\033[0m"
         ;;
     stop)
         scale_workloads 0
