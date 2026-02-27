@@ -15,11 +15,12 @@
 #   ./manage-project.sh shutdown - [Advanced] Stop the entire OrbStack engine
 #
 # Target Namespaces:
-#   airflow, analytics, minio, nessie, spark, superset, trino
+#   keda, airflow, analytics, minio, nessie, spark, superset, trino
 # ==============================================================================
 
 # Configuration: (Release Name, Namespace, Chart Path, Values Path)
 RELEASES=(
+    "keda:keda:kedacore/keda:"
     "airflow:airflow:./airflow:./airflow/custom-values.yaml"
     "postgres-analytics:analytics:oci://registry-1.docker.io/bitnamicharts/postgresql:./superset/analytics-values.yaml"
     "minio:minio:./minio/minio:./minio/custom-values.yaml"
@@ -30,7 +31,7 @@ RELEASES=(
 )
 
 # Namespace list for scaling and status
-NAMESPACES=("airflow" "analytics" "minio" "nessie" "spark" "superset" "trino")
+NAMESPACES=("keda" "airflow" "analytics" "minio" "nessie" "spark" "superset" "trino")
 
 function scale_workloads() {
     local replicas=$1
@@ -64,14 +65,14 @@ function deploy_charts() {
     for entry in "${RELEASES[@]}"; do
         IFS=":" read -r release namespace chart values <<< "$entry"
         echo -e "\n\033[1;34m>>> Processing $release in $namespace <<<\033[0m"
-        
+
         # Uninstall if exists
         echo "Uninstalling $release..."
         helm uninstall "$release" -n "$namespace" 2>/dev/null || echo "$release not found, skipping uninstall."
-        
+
         # Ensure namespace exists
         kubectl create namespace "$namespace" 2>/dev/null || true
-        
+
         # Install
         echo "Installing $release using $chart..."
         if [[ "$chart" == *"spark-operator"* ]]; then
@@ -82,7 +83,12 @@ function deploy_charts() {
             helm upgrade --install "$release" "$chart" -n "$namespace" -f "$values"
         fi
     done
-    
+
+    # Deploy Spark Thrift Server (non-Helm manifest)
+    echo -e "\n\033[1;34m>>> Deploying Spark Thrift Server <<<\033[0m"
+    kubectl delete -f ./spark/spark-thrift-server.yaml 2>/dev/null || echo "Spark Thrift Server not found, skipping delete."
+    kubectl apply -f ./spark/spark-thrift-server.yaml
+
     echo -e "\n\033[1;32mDeployment complete. Services are starting...\033[0m"
 }
 

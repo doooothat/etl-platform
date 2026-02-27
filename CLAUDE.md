@@ -12,8 +12,9 @@ etl-platform/
 ├── airflow/                 # Airflow Helm chart (3.0.2, KEDA autoscaling)
 │   ├── custom-values.yaml
 │   └── dags/                # DAGs (hostPath mounted, survives teardown)
-├── spark/                   # Spark Operator Helm chart
+├── spark/                   # Spark Operator Helm chart + Thrift Server
 │   ├── custom-values.yaml
+│   ├── spark-thrift-server.yaml  # Thrift Server deployment (non-Helm)
 │   └── examples/            # SparkApplication YAMLs
 ├── minio/                   # MinIO Helm chart (standalone, ephemeral)
 │   └── custom-values.yaml
@@ -41,8 +42,10 @@ etl-platform/
 
 | Service | Namespace | External Port |
 |---------|-----------|---------------|
+| KEDA | keda | - (autoscaling operator) |
 | Airflow | airflow | 8080 |
 | Spark Operator | spark | - |
+| Spark Thrift Server | spark | 10000 (Thrift), 4040 (UI) |
 | MinIO | minio | 9000 (API), 9001 (Console) |
 | Nessie | nessie | - (ClusterIP 19120) |
 | Trino | trino | 18080 |

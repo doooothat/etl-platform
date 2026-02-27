@@ -25,7 +25,8 @@ echo "🚀 Running Spark Job for Iceberg & Nessie initialization..."
 kubectl delete sparkapplication iceberg-nessie-restore -n spark --ignore-not-found
 
 # 신규 실행
-kubectl apply -f /Users/smylere/work/etl-platform/spark/examples/spark-iceberg-nessie.yaml
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+kubectl apply -f "$SCRIPT_DIR/spark/examples/spark-iceberg-nessie.yaml"
 
 echo "👀 Watching Spark Job progress..."
 for i in {1..30}; do
