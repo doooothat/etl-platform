@@ -2,6 +2,11 @@
 
 Local data lakehouse platform on OrbStack (K3s).
 
+> **AI Tooling**: 이 프로젝트는 **Claude Code**(터미널)와 **Antigravity**(IDE)를 병행 사용합니다.
+> - 상세 아키텍처 → `./overview.md`
+> - 실전 트러블슈팅 패턴 → `~/.claude/projects/-Users-smylere-work-etl-platform/memory/MEMORY.md`
+> - 인프라 운영 워크플로우 → `.agents/workflows/`
+
 ## Project Structure
 
 ```
