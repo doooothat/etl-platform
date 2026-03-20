@@ -86,7 +86,7 @@ else
         -H 'Content-Type: application/json' \
         -d '{
           \"database_name\": \"Trino (Iceberg/Nessie)\",
-          \"sqlalchemy_uri\": \"trino://trino@trino.trino.svc.cluster.local:8080/nessie\",
+          \"sqlalchemy_uri\": \"trino://trino@trino.trino.svc.cluster.local:18080/iceberg\",
           \"expose_in_sqllab\": true,
           \"allow_run_async\": true,
           \"allow_ctas\": true,
