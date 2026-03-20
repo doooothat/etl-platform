@@ -56,13 +56,13 @@ etl-platform/
 | Nessie | nessie | - (ClusterIP 19120) |
 | Trino | trino | 18080 |
 | Superset | superset | 8088 |
-| Analytics DB | analytics | 5433 |
 
 ## Architecture Notes
 
 - All stores are **ephemeral** (no PVC persistence). Data is recreated via `init_data.sh`.
-- Deploy uses **3-stage ordering**: infra (MinIO, Nessie, Analytics DB) → data (Spark, Trino) → apps (Airflow, Superset)
+- Deploy uses **3-stage ordering**: infra (MinIO, Nessie) → data (Spark, Trino) → apps (Airflow, Superset)
 - Airflow 3.x uses `api-server` (not `webserver`). Pod label: `component=api-server`
 - DAGs are hostPath mounted from `airflow/dags/` — they survive any teardown.
 - Nessie catalog is IN_MEMORY; MinIO has no persistence. Both reset on pod restart.
+- **Sample data** is loaded via Spark into Iceberg/Nessie (`nessie.ecommerce.*`). Superset queries it via Trino — no separate analytics PostgreSQL.
 - `feat/infra-lifecycle-management` branch has improved lifecycle commands (deploy, teardown, rebuild with health checks).

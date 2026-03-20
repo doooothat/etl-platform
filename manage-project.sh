@@ -15,14 +15,15 @@
 #   ./manage-project.sh shutdown - [Advanced] Stop the entire OrbStack engine
 #
 # Target Namespaces:
-#   keda, airflow, analytics, minio, nessie, spark, superset, trino
+#   keda, airflow, minio, nessie, spark, superset, trino
 # ==============================================================================
 
 # Configuration: (Release Name, Namespace, Chart Path, Values Path)
+# Sample data lives in Iceberg/Nessie (via Spark), queried by Trino → Superset.
+# No separate analytics PostgreSQL is needed.
 RELEASES=(
     "keda:keda:kedacore/keda:"
     "airflow:airflow:./airflow:./airflow/custom-values.yaml"
-    "postgres-analytics:analytics:oci://registry-1.docker.io/bitnamicharts/postgresql:./superset/analytics-values.yaml"
     "minio:minio:./minio/minio:./minio/custom-values.yaml"
     "nessie:nessie:./nessie/nessie:./nessie/custom-values.yaml"
     "spark-operator:spark:spark-operator/spark-operator:./spark/custom-values.yaml"
@@ -31,7 +32,7 @@ RELEASES=(
 )
 
 # Namespace list for scaling and status
-NAMESPACES=("keda" "airflow" "analytics" "minio" "nessie" "spark" "superset" "trino")
+NAMESPACES=("keda" "airflow" "minio" "nessie" "spark" "superset" "trino")
 
 function scale_workloads() {
     local replicas=$1

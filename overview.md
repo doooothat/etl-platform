@@ -49,14 +49,14 @@ Cluster (Local Kubernetes: Orbstack)
     ├── Deployment: superset
     │   └── Pod: superset-xxxxx
     │       └── Container: superset-webserver
-    ├── Deployment: superset-postgresql (metadata DB)
+    ├── Deployment: superset-postgresql (metadata DB only)
     │   └── Pod: superset-postgresql-xxxxx
-    │       └── Container: postgres
-    ├── Deployment: postgres-analytics (analytics DB)
-    │   └── Pod: postgres-analytics-xxxxx
     │       └── Container: postgres
     └── Service: superset (LoadBalancer: 8088)
 ```
+
+> **샘플 데이터**: Superset 빌트인 SQLite 예제 대신, Spark Job이 Iceberg/Nessie에 ecommerce
+> 데이터셋(customers, products, orders)을 적재하고 Superset은 Trino를 통해 쿼리합니다.
 
 ## 2) 외부 접속 경로 (로컬, LoadBalancer 기준)
 
@@ -92,11 +92,13 @@ Trino → MinIO S3
   secretKey: password
   region: us-east-1
 
-Superset → Metadata DB
+Superset → Metadata DB (Helm 내장 PostgreSQL)
   postgresql://superset:superset@superset-postgresql:5432/superset
 
-Superset → Analytics DB
-  postgresql://analytics:analytics@postgres-analytics-postgresql.analytics.svc.cluster.local:5433/analytics
+Superset → Analytics Data (Trino 경유)
+  trino://trino@trino.trino.svc.cluster.local:8080/nessie
+  (Trino가 Nessie catalog를 통해 Iceberg 테이블 쿼리)
+  Tables: nessie.ecommerce.customers / products / orders
 ```
 
 ## 4) 서비스/포트/크리덴셜 요약표
@@ -104,7 +106,6 @@ Superset → Analytics DB
 | 컴포넌트             | 내부 DNS                                                    | 포트  | 외부 접속                | 계정                      |
 |----------------------|-------------------------------------------------------------|-------|--------------------------|---------------------------|
 | Airflow Webserver    | `airflow-webserver.airflow.svc.cluster.local`               | 8080  | `http://localhost:8080`  | 기본 admin (Helm init)    |
-| Analytics DB         | `postgres-analytics-postgresql.analytics.svc.cluster.local` | 5433  | 내부 전용                | `analytics` / `analytics` |
 | MinIO API            | `minio.minio.svc.cluster.local`                             | 9000  | `http://localhost:9000`  | `admin` / `password`      |
 | MinIO Console        | `minio-console.minio.svc.cluster.local`                     | 9001  | `http://localhost:9001`  | `admin` / `password`      |
 | Nessie               | `nessie.nessie.svc.cluster.local`                           | 19120 | 내부 전용                | N/A                       |
@@ -144,12 +145,11 @@ Superset → Analytics DB
 deploy 완료 후 실행. 플랫폼을 working 상태로 만드는 단일 스크립트.
 
 ```
-Step 1: 코어 서비스 readiness 대기
-Step 2: MinIO 버킷 확인 (iceberg-data)
-Step 3: Spark job으로 Iceberg/Nessie 테스트 데이터 생성
-Step 4: Airflow connections 설정 (Trino, Spark)
-Step 5: Superset 예제 데이터 로드
-Step 6: Superset에 Trino DB 연결 설정
+Step 1: 코어 서비스 readiness 대기 (Nessie, MinIO)
+Step 2: Spark Job으로 Iceberg/Nessie 샘플 데이터 생성
+        → nessie.ecommerce.{customers, products, orders}
+Step 3: Superset API로 Trino DB 연결 자동 등록
+        → trino://trino@trino.trino.svc.cluster.local:8080/nessie
 ```
 
 ### 일반적인 운영 시나리오

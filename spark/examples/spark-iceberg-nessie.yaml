@@ -89,46 +89,148 @@ metadata:
 data:
   restore_data.py: |
     from pyspark.sql import SparkSession
+    from pyspark.sql.types import (
+        StructType, StructField, StringType, IntegerType,
+        DoubleType, DateType, TimestampType
+    )
+    from datetime import date, datetime
     import sys
 
     spark = SparkSession.builder.getOrCreate()
+    spark.sparkContext.setLogLevel("WARN")
 
-    print("--- Starting Iceberg + Nessie Standard Test ---")
+    print("=== Starting Iceberg + Nessie Sample Data Initialization ===")
 
-    # 1. Create Data in Main
-    print("Step 1: Creating data in main branch...")
-    data_main = [("1", "Alice", 30), ("2", "Bob", 25)]
-    df_main = spark.createDataFrame(data_main, ["id", "name", "age"])
-    spark.sql("CREATE DATABASE IF NOT EXISTS nessie.db")
-    df_main.writeTo("nessie.db.users").createOrReplace()
+    # ------------------------------------------------------------------
+    # 0. Namespace 생성
+    # ------------------------------------------------------------------
+    spark.sql("CREATE DATABASE IF NOT EXISTS nessie.ecommerce")
+    print("✅ namespace 'ecommerce' ready")
 
-    print("Table in 'main':")
-    spark.table("nessie.db.users").show()
+    # ------------------------------------------------------------------
+    # 1. customers 테이블
+    # ------------------------------------------------------------------
+    print("\n[1/3] Creating customers table...")
+    customers_schema = StructType([
+        StructField("customer_id",  IntegerType(), False),
+        StructField("name",         StringType(),  True),
+        StructField("email",        StringType(),  True),
+        StructField("country",      StringType(),  True),
+        StructField("signup_date",  DateType(),    True),
+    ])
+    customers_data = [
+        (1,  "Alice Kim",       "alice@example.com",   "KR", date(2022, 1, 10)),
+        (2,  "Bob Smith",       "bob@example.com",     "US", date(2022, 3, 22)),
+        (3,  "Chen Wei",        "chen@example.com",    "CN", date(2022, 5, 5)),
+        (4,  "Diana Muller",    "diana@example.com",   "DE", date(2022, 7, 17)),
+        (5,  "Ethan Brown",     "ethan@example.com",   "US", date(2022, 9, 30)),
+        (6,  "Fiona Park",      "fiona@example.com",   "KR", date(2023, 1, 8)),
+        (7,  "George Tanaka",   "george@example.com",  "JP", date(2023, 2, 15)),
+        (8,  "Hana Patel",      "hana@example.com",    "IN", date(2023, 4, 3)),
+        (9,  "Ivan Petrov",     "ivan@example.com",    "RU", date(2023, 6, 20)),
+        (10, "Julia Santos",    "julia@example.com",   "BR", date(2023, 8, 11)),
+        (11, "Kevin Johnson",   "kevin@example.com",   "US", date(2023, 10, 5)),
+        (12, "Lena Fischer",    "lena@example.com",    "DE", date(2024, 1, 14)),
+        (13, "Mike Lee",        "mike@example.com",    "KR", date(2024, 3, 29)),
+        (14, "Nina Ivanova",    "nina@example.com",    "RU", date(2024, 5, 7)),
+        (15, "Oscar Martínez",  "oscar@example.com",   "MX", date(2024, 7, 22)),
+    ]
+    df_customers = spark.createDataFrame(customers_data, customers_schema)
+    df_customers.writeTo("nessie.ecommerce.customers").createOrReplace()
+    print(f"  → {df_customers.count()} rows inserted into customers")
 
-    # 2. Branching Test
-    print("Step 2: Creating branch 'experiment' and adding data...")
-    spark.sql("CREATE BRANCH experiment IN nessie FROM main")
-    spark.sql("USE REFERENCE experiment IN nessie")
+    # ------------------------------------------------------------------
+    # 2. products 테이블
+    # ------------------------------------------------------------------
+    print("\n[2/3] Creating products table...")
+    products_schema = StructType([
+        StructField("product_id",   IntegerType(), False),
+        StructField("name",         StringType(),  True),
+        StructField("category",     StringType(),  True),
+        StructField("price",        DoubleType(),  True),
+        StructField("stock",        IntegerType(), True),
+    ])
+    products_data = [
+        (101, "Laptop Pro 15",       "Electronics",  1299.99, 50),
+        (102, "Wireless Mouse",      "Electronics",    29.99, 200),
+        (103, "USB-C Hub 7-port",    "Electronics",    59.99, 150),
+        (104, "Mechanical Keyboard", "Electronics",   129.99, 80),
+        (105, "4K Monitor 27\"",     "Electronics",   399.99, 30),
+        (201, "Standing Desk",       "Furniture",     499.99, 20),
+        (202, "Ergonomic Chair",     "Furniture",     349.99, 25),
+        (203, "Desk Lamp LED",       "Furniture",      49.99, 100),
+        (301, "Python Cookbook",     "Books",          42.00, 300),
+        (302, "Data Engineering",    "Books",          55.00, 180),
+        (303, "System Design",       "Books",          48.00, 220),
+        (401, "Running Shoes",       "Sports",        119.99, 60),
+        (402, "Yoga Mat",            "Sports",         29.99, 120),
+        (403, "Resistance Bands",    "Sports",         19.99, 250),
+    ]
+    df_products = spark.createDataFrame(products_data, products_schema)
+    df_products.writeTo("nessie.ecommerce.products").createOrReplace()
+    print(f"  → {df_products.count()} rows inserted into products")
 
-    new_data = [("3", "Charlie", 35)]
-    df_new = spark.createDataFrame(new_data, ["id", "name", "age"])
-    df_new.writeTo("nessie.db.users").append()
+    # ------------------------------------------------------------------
+    # 3. orders 테이블 (핵심 팩트 테이블)
+    # ------------------------------------------------------------------
+    print("\n[3/3] Creating orders table...")
+    orders_schema = StructType([
+        StructField("order_id",     IntegerType(), False),
+        StructField("customer_id",  IntegerType(), True),
+        StructField("product_id",   IntegerType(), True),
+        StructField("quantity",     IntegerType(), True),
+        StructField("unit_price",   DoubleType(),  True),
+        StructField("total_amount", DoubleType(),  True),
+        StructField("status",       StringType(),  True),
+        StructField("order_date",   DateType(),    True),
+    ])
+    orders_data = [
+        (1001, 1,  101, 1, 1299.99, 1299.99, "completed",  date(2023, 1, 15)),
+        (1002, 2,  102, 2,   29.99,   59.98, "completed",  date(2023, 2, 3)),
+        (1003, 3,  201, 1,  499.99,  499.99, "completed",  date(2023, 3, 20)),
+        (1004, 1,  103, 1,   59.99,   59.99, "completed",  date(2023, 4, 11)),
+        (1005, 4,  105, 2,  399.99,  799.98, "completed",  date(2023, 5, 7)),
+        (1006, 5,  301, 3,   42.00,  126.00, "completed",  date(2023, 6, 14)),
+        (1007, 6,  202, 1,  349.99,  349.99, "completed",  date(2023, 7, 28)),
+        (1008, 7,  401, 2,  119.99,  239.98, "completed",  date(2023, 8, 5)),
+        (1009, 8,  104, 1,  129.99,  129.99, "completed",  date(2023, 9, 19)),
+        (1010, 2,  302, 1,   55.00,   55.00, "completed",  date(2023, 10, 2)),
+        (1011, 9,  403, 3,   19.99,   59.97, "completed",  date(2023, 11, 23)),
+        (1012, 10, 203, 2,   49.99,   99.98, "completed",  date(2023, 12, 1)),
+        (1013, 11, 101, 1, 1299.99, 1299.99, "processing", date(2024, 1, 9)),
+        (1014, 12, 402, 2,   29.99,   59.98, "processing", date(2024, 2, 17)),
+        (1015, 3,  303, 1,   48.00,   48.00, "completed",  date(2024, 3, 4)),
+        (1016, 13, 105, 1,  399.99,  399.99, "shipped",    date(2024, 4, 22)),
+        (1017, 6,  102, 3,   29.99,   89.97, "completed",  date(2024, 5, 8)),
+        (1018, 14, 201, 1,  499.99,  499.99, "cancelled",  date(2024, 6, 15)),
+        (1019, 5,  401, 1,  119.99,  119.99, "shipped",    date(2024, 7, 30)),
+        (1020, 15, 104, 2,  129.99,  259.98, "processing", date(2024, 8, 12)),
+    ]
+    df_orders = spark.createDataFrame(orders_data, orders_schema)
+    df_orders.writeTo("nessie.ecommerce.orders").createOrReplace()
+    print(f"  → {df_orders.count()} rows inserted into orders")
 
-    print("Table in 'experiment':")
-    spark.table("nessie.db.users").show()
+    # ------------------------------------------------------------------
+    # 검증
+    # ------------------------------------------------------------------
+    print("\n=== Verification ===")
+    for tbl in ["customers", "products", "orders"]:
+        cnt = spark.sql(f"SELECT COUNT(*) AS cnt FROM nessie.ecommerce.{tbl}").collect()[0]["cnt"]
+        print(f"  nessie.ecommerce.{tbl}: {cnt} rows ✅")
 
-    # 3. Verify Isolation
-    print("Step 3: Switching back to 'main' and verifying isolation...")
-    spark.sql("USE REFERENCE main IN nessie")
-    print("Table in 'main' (expected: 2 rows):")
-    spark.table("nessie.db.users").show()
+    # 간단한 집계 검증
+    print("\n[Revenue by Category (TOP 5)]")
+    spark.sql("""
+        SELECT p.category,
+               COUNT(o.order_id)       AS order_count,
+               ROUND(SUM(o.total_amount), 2) AS total_revenue
+        FROM nessie.ecommerce.orders o
+        JOIN nessie.ecommerce.products p ON o.product_id = p.product_id
+        WHERE o.status != 'cancelled'
+        GROUP BY p.category
+        ORDER BY total_revenue DESC
+        LIMIT 5
+    """).show()
 
-    count = spark.table("nessie.db.users").count()
-    if count == 2:
-        print("✅ SUCCESS: Nessie Integration Verified.")
-    else:
-        print(f"❌ FAILURE: Isolation failed. Found {count} rows.")
-        sys.exit(1)
-
-    print("--- Standard Test Completed ---")
+    print("=== Sample Data Initialization Completed Successfully ===")
     spark.stop()
