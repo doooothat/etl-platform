@@ -1,119 +1,214 @@
 #!/bin/bash
+set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
+log()  { echo "  $*"; }
+ok()   { echo "✅ $*"; }
+warn() { echo "⚠️  $*"; }
+fail() { echo "❌ $*"; }
+step() { echo ""; echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"; echo "🔷 $*"; }
 
 echo "🔄 Starting Data Initialization for ETL Platform..."
+echo "   $(date '+%Y-%m-%d %H:%M:%S')"
 
-# 1. Nessie & MinIO 상태 대기
-echo "⏳ Waiting for Nessie & MinIO..."
-kubectl wait --for=condition=available --timeout=60s deployment/nessie -n nessie
-kubectl wait --for=condition=available --timeout=60s deployment/minio -n minio
-echo "✅ Storage layer is ready."
+# ==============================================================================
+# Step 1. MinIO 대기 + iceberg-data 버킷 생성
+# ==============================================================================
+step "Step 1: MinIO - Waiting & Creating bucket..."
 
-# 2. Iceberg + Nessie 샘플 데이터 생성 (Spark Job)
-# - nessie.ecommerce.customers / products / orders 테이블을 Iceberg 형식으로 생성
-# - Superset은 Trino를 통해 이 데이터를 직접 쿼리함 (별도 SQLite/Postgres 불필요)
-echo "🚀 Running Spark Job to create Iceberg sample data (ecommerce dataset)..."
+log "Waiting for MinIO to be available..."
+kubectl wait --for=condition=available --timeout=120s deployment/minio -n minio
+ok "MinIO is ready."
 
-# 기존 Job이 있다면 삭제 (중복 실행 방지)
-kubectl delete sparkapplication iceberg-nessie-restore -n spark --ignore-not-found
+log "Ensuring 'iceberg-data' bucket exists..."
+kubectl exec -n minio deploy/minio -- bash -c "
+  mc alias set local http://localhost:9000 admin password --quiet
+  mc mb local/iceberg-data --ignore-existing
+" && ok "Bucket 'iceberg-data' is ready." || warn "Bucket creation failed, Nessie may fail health check."
 
-# 신규 실행
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# ==============================================================================
+# Step 2. Nessie 대기 (버킷이 있어야 health check 통과)
+# ==============================================================================
+step "Step 2: Nessie - Waiting for health check..."
+
+log "Waiting for Nessie to be available (requires iceberg-data bucket)..."
+kubectl wait --for=condition=available --timeout=120s deployment/nessie -n nessie
+ok "Nessie is ready."
+
+# ==============================================================================
+# Step 3. Iceberg + Nessie 샘플 데이터 생성 (Spark Job)
+# ==============================================================================
+step "Step 3: Spark Job - Creating Iceberg sample data (ecommerce dataset)..."
+
+log "Deleting previous job if exists..."
+kubectl delete sparkapplication iceberg-nessie-restore -n spark --ignore-not-found --wait=false
+
+log "Submitting Spark job..."
 kubectl apply -f "$SCRIPT_DIR/spark/examples/spark-iceberg-nessie.yaml"
 
-echo "👀 Watching Spark Job progress..."
+log "Watching Spark Job progress (max 5 min)..."
+SPARK_SUCCESS=false
 for i in {1..60}; do
-  STATE=$(kubectl get sparkapplication iceberg-nessie-restore -n spark -o jsonpath='{.status.applicationState.state}')
-  echo "  [${i}/60] Current Spark State: $STATE"
-  if [ "$STATE" == "COMPLETED" ]; then
-    echo "✅ Iceberg sample data initialized successfully!"
-    echo "   Tables: nessie.ecommerce.customers / products / orders"
-    echo "   Query via Trino: SELECT * FROM nessie.ecommerce.orders LIMIT 10"
+  STATE=$(kubectl get sparkapplication iceberg-nessie-restore -n spark \
+    -o jsonpath='{.status.applicationState.state}' 2>/dev/null || echo "PENDING")
+  printf "\r  [%2d/60] State: %-12s" "$i" "$STATE"
+  if [ "$STATE" = "COMPLETED" ]; then
+    echo ""
+    ok "Iceberg sample data created!"
+    log "Tables: iceberg.ecommerce.{customers, products, orders}"
+    SPARK_SUCCESS=true
     break
   fi
-  if [ "$STATE" == "FAILED" ]; then
-    echo "❌ Spark Job Failed. Check logs:"
-    echo "   kubectl logs -n spark -l spark-role=driver"
+  if [ "$STATE" = "FAILED" ] || [ "$STATE" = "SUBMISSION_FAILED" ]; then
+    echo ""
+    fail "Spark Job failed. Debug:"
+    log "kubectl logs -n spark -l spark-role=driver --tail=30"
     break
   fi
   sleep 5
 done
-
-# 3. Superset: Trino DB 연결 등록 (API 방식)
 echo ""
-echo "🔗 Registering Trino connection in Superset..."
 
-# Superset 파드가 Ready 상태일 때까지 대기
-SUPERSET_POD=""
-for i in {1..24}; do
-  SUPERSET_POD=$(kubectl get pods -n superset -l app=superset \
-    --field-selector=status.phase=Running \
-    -o jsonpath='{.items[0].metadata.name}' 2>/dev/null)
-  if [ -n "$SUPERSET_POD" ]; then
-    echo "  Superset pod found: $SUPERSET_POD"
-    break
-  fi
-  echo "  [${i}/24] Waiting for Superset pod..."
-  sleep 10
-done
-
-if [ -z "$SUPERSET_POD" ]; then
-  echo "⚠️  Superset pod not found. Skipping auto DB registration."
-  echo "   수동 등록: Superset UI → Settings → Database Connections → + Database"
-  echo "   SQLAlchemy URI: trino://trino@trino.trino.svc.cluster.local:8080/nessie"
-else
-  # Superset Admin API로 Trino 연결 등록 (이미 존재하면 스킵)
-  kubectl exec -n superset "$SUPERSET_POD" -- bash -c "
-    ACCESS_TOKEN=\$(curl -s -X POST http://localhost:8088/api/v1/security/login \
-      -H 'Content-Type: application/json' \
-      -d '{\"username\":\"admin\",\"password\":\"admin\",\"provider\":\"db\",\"refresh\":true}' \
-      | python3 -c 'import sys,json; print(json.load(sys.stdin)[\"access_token\"])' 2>/dev/null)
-
-    if [ -z \"\$ACCESS_TOKEN\" ]; then
-      echo '  ⚠️  Could not get Superset access token. Register Trino DB manually.'
-      exit 0
-    fi
-
-    # 기존 Trino DB 연결 존재 여부 확인
-    EXISTING=\$(curl -s -X GET http://localhost:8088/api/v1/database/ \
-      -H \"Authorization: Bearer \$ACCESS_TOKEN\" \
-      | python3 -c 'import sys,json; dbs=json.load(sys.stdin).get(\"result\",[]); print(next((str(d[\"id\"]) for d in dbs if \"trino\" in d.get(\"sqlalchemy_uri\",\"\").lower()), \"\"))' 2>/dev/null)
-
-    if [ -n \"\$EXISTING\" ]; then
-      echo \"  ✅ Trino DB already registered (id=\$EXISTING). Skipping.\"
-    else
-      RESULT=\$(curl -s -X POST http://localhost:8088/api/v1/database/ \
-        -H \"Authorization: Bearer \$ACCESS_TOKEN\" \
-        -H 'Content-Type: application/json' \
-        -d '{
-          \"database_name\": \"Trino (Iceberg/Nessie)\",
-          \"sqlalchemy_uri\": \"trino://trino@trino.trino.svc.cluster.local:18080/iceberg\",
-          \"expose_in_sqllab\": true,
-          \"allow_run_async\": true,
-          \"allow_ctas\": true,
-          \"allow_cvas\": true,
-          \"allow_dml\": true,
-          \"extra\": \"{\\\"engine_params\\\": {\\\"connect_args\\\": {}}}\"
-        }')
-      DB_ID=\$(echo \"\$RESULT\" | python3 -c 'import sys,json; r=json.load(sys.stdin); print(r.get(\"id\",\"\"))' 2>/dev/null)
-      if [ -n \"\$DB_ID\" ]; then
-        echo \"  ✅ Trino DB registered in Superset (id=\$DB_ID)\"
-      else
-        echo \"  ⚠️  Failed to register Trino DB. Response: \$RESULT\"
-      fi
-    fi
-  " || echo "  ⚠️  Could not exec into Superset pod. Register Trino DB manually."
+if [ "$SPARK_SUCCESS" = false ]; then
+  warn "Spark Job did not complete within timeout. Continuing anyway..."
 fi
 
+# ==============================================================================
+# Step 4. Superset 대기 + DB 초기화 (ephemeral PostgreSQL이므로 매번 필요)
+# ==============================================================================
+step "Step 4: Superset - Waiting & Initializing DB..."
+
+log "Waiting for Superset pod to be running..."
+SUPERSET_POD=""
+for i in {1..30}; do
+  SUPERSET_POD=$(kubectl get pods -n superset -l app=superset \
+    --field-selector=status.phase=Running \
+    -o jsonpath='{.items[0].metadata.name}' 2>/dev/null || true)
+  if [ -n "$SUPERSET_POD" ]; then
+    log "Superset pod: $SUPERSET_POD"
+    break
+  fi
+  printf "\r  [%2d/30] Waiting for Superset pod..." "$i"
+  sleep 10
+done
 echo ""
-echo "✨ All data initialization tasks completed!"
+
+if [ -z "$SUPERSET_POD" ]; then
+  warn "Superset pod not found. Skipping Superset init."
+else
+  # PostgreSQL이 ephemeral이므로 매 시작마다 DB 초기화 필요
+  log "Running Superset DB initialization (db upgrade + admin user + init)..."
+  kubectl exec -n superset "$SUPERSET_POD" -- bash -c "
+    set -e
+    # DB 마이그레이션
+    superset db upgrade 2>&1 | grep -E '(ERROR|WARNING|Upgrading|Running|Done|OK)' || true
+
+    # Admin 계정 생성 (이미 있으면 무시)
+    superset fab create-admin \
+      --username admin \
+      --firstname Superset \
+      --lastname Admin \
+      --email admin@superset.com \
+      --password admin 2>&1 | tail -3
+
+    # 권한/역할 초기화
+    superset init 2>&1 | grep -E '(ERROR|Syncing|Creating|Cleaning)' || true
+
+    echo 'SUPERSET_INIT_OK'
+  " 2>/dev/null | grep -q "SUPERSET_INIT_OK" \
+    && ok "Superset DB initialized." \
+    || warn "Superset DB init may have issues (continuing anyway)."
+
+  # ==============================================================================
+  # Step 5. Superset Worker + Webserver 파드에 sqlalchemy-trino 설치
+  # ==============================================================================
+  step "Step 5: Installing sqlalchemy-trino in Superset pods..."
+
+  # Note: bootstrapScript에도 추가해뒀으므로 다음 fresh deploy부터는 자동
+  for COMPONENT in "app=superset" "app=superset-worker"; do
+    PODS=$(kubectl get pods -n superset -l "$COMPONENT" \
+      --field-selector=status.phase=Running \
+      -o jsonpath='{.items[*].metadata.name}' 2>/dev/null || true)
+    for POD in $PODS; do
+      log "Installing sqlalchemy-trino in $POD..."
+      kubectl exec -n superset "$POD" -- bash -c "
+        pip install sqlalchemy-trino \
+          --target /app/.venv/lib/python3.10/site-packages \
+          --quiet 2>/dev/null
+        /app/.venv/bin/python3 -c 'import trino; print(\"trino\", trino.__version__)' 2>/dev/null \
+          && echo 'TRINO_OK' || echo 'TRINO_FAIL'
+      " 2>/dev/null | grep -q "TRINO_OK" \
+        && ok "sqlalchemy-trino ready in $POD" \
+        || warn "sqlalchemy-trino install may have failed in $POD"
+    done
+  done
+
+  # ==============================================================================
+  # Step 6. Superset에 Trino DB 연결 자동 등록
+  # ==============================================================================
+  step "Step 6: Registering Trino DB connection in Superset..."
+
+  TRINO_URI="trino://trino@trino.trino.svc.cluster.local:18080/iceberg"
+
+  # Python 스크립트를 base64로 인코딩 후 전달 (kubectl exec stdin/heredoc 이슈 우회)
+  _PY=$(cat <<'PYEOF'
+import urllib.request, urllib.error, json, sys
+BASE="http://localhost:8088"; TRINO_NAME="Trino (Iceberg/Nessie)"; TRINO_URI="trino://trino@trino.trino.svc.cluster.local:18080/iceberg"
+def http(method, path, data=None, headers=None):
+    req=urllib.request.Request(BASE+path,data=data,headers=headers or {},method=method)
+    try: return json.loads(urllib.request.urlopen(req,timeout=15).read())
+    except urllib.error.HTTPError as e: return json.loads(e.read())
+    except Exception as e: return {"error":str(e)}
+r=http("POST","/api/v1/security/login",data=json.dumps({"username":"admin","password":"admin","provider":"db","refresh":True}).encode(),headers={"Content-Type":"application/json"})
+token=r.get("access_token","")
+if not token: print("TOKEN_FAIL"); sys.exit(0)
+auth={"Authorization":f"Bearer {token}"}
+csrf=http("GET","/api/v1/security/csrf_token/",headers=auth).get("result","")
+r3=http("GET","/api/v1/database/",headers=auth)
+existing=next((str(d["id"]) for d in r3.get("result",[]) if "trino" in d.get("database_name","").lower()),"")
+if existing: print(f"ALREADY_EXISTS:{existing}"); sys.exit(0)
+h={**auth,"X-CSRFToken":csrf,"Content-Type":"application/json","Referer":BASE}
+r4=http("POST","/api/v1/database/",data=json.dumps({"database_name":TRINO_NAME,"sqlalchemy_uri":TRINO_URI,"expose_in_sqllab":True,"allow_run_async":True,"allow_ctas":True,"allow_cvas":True,"allow_dml":True}).encode(),headers=h)
+db_id=r4.get("id",""); msg=str(r4.get("message",""))
+if db_id: print(f"REGISTERED:{db_id}")
+elif "already exists" in msg.lower(): print("ALREADY_EXISTS:name_conflict")
+else: print(f"REG_FAIL:{r4}")
+PYEOF
+  )
+  _B64=$(printf '%s' "$_PY" | base64)
+  _last_line=$(kubectl exec -n superset "$SUPERSET_POD" -- \
+    bash -c "echo '$_B64' | base64 -d | /app/.venv/bin/python3" 2>/dev/null || true)
+
+  case "$_last_line" in
+    TOKEN_FAIL*)       warn "Could not get Superset access token. Run init_data.sh again after Superset is fully ready." ;;
+    ALREADY_EXISTS:*)  ok  "Trino DB connection already registered (id=${_last_line#ALREADY_EXISTS:})." ;;
+    REGISTERED:*)      ok  "Trino DB connection registered in Superset (id=${_last_line#REGISTERED:})." ;;
+    REG_FAIL:*)        warn "Trino DB registration failed. Register manually via Superset UI." ;;
+    "")                warn "No response from Superset registration script." ;;
+  esac
+fi
+
+# ==============================================================================
+# Done
+# ==============================================================================
 echo ""
-echo "📊 Next Steps:"
-echo "  1. Open Superset UI: http://localhost:8088  (admin/admin)"
-echo "  2. Go to SQL Lab → select 'Trino (Iceberg/Nessie)' database"
-echo "  3. Schema: ecommerce | Tables: customers, products, orders"
-echo "  4. Sample query:"
-echo "     SELECT p.category, SUM(o.total_amount) AS revenue"
-echo "     FROM ecommerce.orders o"
-echo "     JOIN ecommerce.products p ON o.product_id = p.product_id"
-echo "     WHERE o.status = 'completed'"
-echo "     GROUP BY p.category ORDER BY revenue DESC"
+echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+echo "✨ All initialization tasks completed!"
+echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+echo ""
+echo "📊 How to use:"
+echo "  → Superset:  http://localhost:8088  (admin / admin)"
+echo "  → SQL Lab:   Database = 'Trino (Iceberg/Nessie)'  |  Schema = 'ecommerce'"
+echo "  → Tables:    customers · products · orders"
+echo ""
+echo "  Sample query:"
+echo "    SELECT p.category,"
+echo "           COUNT(o.order_id)            AS order_count,"
+echo "           ROUND(SUM(o.total_amount),2) AS total_revenue"
+echo "    FROM ecommerce.orders o"
+echo "    JOIN ecommerce.products p ON o.product_id = p.product_id"
+echo "    WHERE o.status != 'cancelled'"
+echo "    GROUP BY p.category"
+echo "    ORDER BY total_revenue DESC"
+echo ""
