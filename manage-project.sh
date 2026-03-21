@@ -5,11 +5,13 @@ set -euo pipefail
 # ETL Platform Management Script
 # ==============================================================================
 # Usage:
-#   ./manage-project.sh start    - Ordered startup (respects dependency chain)
-#   ./manage-project.sh stop     - Scale down all workloads (replicas=0)
-#   ./manage-project.sh status   - Show current status of all workloads
-#   ./manage-project.sh deploy   - Uninstall & Re-install all Helm charts
-#   ./manage-project.sh shutdown - Stop the entire OrbStack engine
+#   ./manage-project.sh start           - Ordered startup (respects dependency chain)
+#   ./manage-project.sh stop            - Scale down all workloads (replicas=0)
+#   ./manage-project.sh status          - Show current status of all workloads
+#   ./manage-project.sh deploy          - Uninstall & Re-install all Helm charts
+#   ./manage-project.sh deploy <name>   - Uninstall & Re-install specific component
+#                                         (e.g., keda, airflow, minio, nessie, spark-operator, superset, trino)
+#   ./manage-project.sh shutdown        - Stop the entire OrbStack engine
 #
 # Dependency order for 'start':
 #   [Stage 0] KEDA
@@ -281,16 +283,28 @@ function stop_all() {
 
 # ── Deploy (Helm install/upgrade) ──────────────────────────────────────────────
 function deploy_charts() {
-    echo -e "${C_RED}WARNING: This will UNINSTALL and RE-INSTALL all project components.${C_RESET}"
-    echo "This may result in data loss if volumes are not persistent. Continue? (y/n)"
-    read -r confirm
-    if [[ "$confirm" != "y" && "$confirm" != "Y" ]]; then
-        echo "Deployment cancelled."
-        return
+    local target_release="$1"  # Optional: specific release name (e.g., "keda", "airflow")
+
+    if [[ -z "$target_release" ]]; then
+        echo -e "${C_RED}WARNING: This will UNINSTALL and RE-INSTALL all project components.${C_RESET}"
+        echo "This may result in data loss if volumes are not persistent. Continue? (y/n)"
+        read -r confirm
+        if [[ "$confirm" != "y" && "$confirm" != "Y" ]]; then
+            echo "Deployment cancelled."
+            return
+        fi
+    else
+        echo -e "${C_YELLOW}Deploying only: $target_release${C_RESET}"
     fi
 
     for entry in "${RELEASES[@]}"; do
         IFS=":" read -r release namespace chart values <<< "$entry"
+
+        # Skip if target is specified and doesn't match
+        if [[ -n "$target_release" && "$release" != "$target_release" ]]; then
+            continue
+        fi
+
         echo -e "\n${C_BLUE}>>> Processing $release in $namespace <<<${C_RESET}"
 
         echo "  Uninstalling $release..."
@@ -309,10 +323,13 @@ function deploy_charts() {
         fi
     done
 
-    echo -e "\n${C_BLUE}>>> Deploying Spark Thrift Server <<<${C_RESET}"
-    kubectl delete -f ./spark/spark-thrift-server.yaml 2>/dev/null \
-        || echo "  Spark Thrift Server not found, skipping delete."
-    kubectl apply -f ./spark/spark-thrift-server.yaml
+    # Deploy Spark Thrift Server if spark-operator was deployed
+    if [[ -z "$target_release" || "$target_release" == "spark-operator" ]]; then
+        echo -e "\n${C_BLUE}>>> Deploying Spark Thrift Server <<<${C_RESET}"
+        kubectl delete -f ./spark/spark-thrift-server.yaml 2>/dev/null \
+            || echo "  Spark Thrift Server not found, skipping delete."
+        kubectl apply -f ./spark/spark-thrift-server.yaml
+    fi
 
     echo -e "\n${C_GREEN}Deployment complete. Run './manage-project.sh start' to bring services up.${C_RESET}"
 }
@@ -334,7 +351,7 @@ case "$1" in
         done
         ;;
     deploy)
-        deploy_charts
+        deploy_charts "$2"  # Pass optional second argument (specific release name)
         ;;
     shutdown)
         echo "Are you sure you want to stop the entire OrbStack engine? (y/n)"
@@ -346,7 +363,12 @@ case "$1" in
         fi
         ;;
     *)
-        echo "Usage: $0 {start|stop|status|deploy|shutdown}"
+        echo "Usage: $0 {start|stop|status|deploy [release]|shutdown}"
+        echo ""
+        echo "Examples:"
+        echo "  $0 deploy           # Deploy all components"
+        echo "  $0 deploy keda      # Deploy only KEDA"
+        echo "  $0 deploy airflow   # Deploy only Airflow"
         exit 1
         ;;
 esac
