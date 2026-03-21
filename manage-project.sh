@@ -48,7 +48,7 @@ RELEASES=(
     "nessie:nessie:./nessie/nessie:./nessie/custom-values.yaml"
     "spark-operator:spark:spark-operator/spark-operator:./spark/custom-values.yaml"
     "superset:superset:./superset/superset:./superset/custom-values.yaml"
-    "trino:trino:trino/trino:./trino/values.yaml"
+    "trino:trino:./trino:./trino/values.yaml"
 )
 
 NAMESPACES=("keda" "airflow" "minio" "nessie" "spark" "superset" "trino")
@@ -88,14 +88,12 @@ function scale_ns() {
     if ! kubectl get ns "$ns" >/dev/null 2>&1; then return 0; fi
     if [[ "$mode" == "both" || "$mode" == "deployments" ]]; then
         if [ "$(kubectl get deployments -n "$ns" 2>/dev/null | wc -l)" -gt 1 ]; then
-            kubectl scale deployment --all --replicas="$replicas" -n "$ns" \
-                --timeout=5s 2>/dev/null || true
+            kubectl scale deployment --all --replicas="$replicas" -n "$ns" 2>/dev/null || true
         fi
     fi
     if [[ "$mode" == "both" || "$mode" == "statefulsets" ]]; then
         if [ "$(kubectl get statefulsets -n "$ns" 2>/dev/null | wc -l)" -gt 1 ]; then
-            kubectl scale statefulset --all --replicas="$replicas" -n "$ns" \
-                --timeout=5s 2>/dev/null || true
+            kubectl scale statefulset --all --replicas="$replicas" -n "$ns" 2>/dev/null || true
         fi
     fi
 }
@@ -270,15 +268,33 @@ function start_ordered() {
 
 # ── Stop (all at once, order doesn't matter) ───────────────────────────────────
 function stop_all() {
-    echo -e "${C_YELLOW}Scaling down all project workloads...${C_RESET}"
+    echo -e "${C_YELLOW}Scaling down all project workloads and completely removing persistent storage...${C_RESET}"
     for ns in "${NAMESPACES[@]}"; do
         if kubectl get ns "$ns" >/dev/null 2>&1; then
             echo "  --- $ns ---"
             scale_ns "$ns" 0
+            
+            # Airflow Redis Pod가 finalizer로 인해 Terminating 상태에서 영구적으로 멈추는 고질적 문제 해결
+            if [[ "$ns" == "airflow" ]]; then
+                # 그냥 강제 삭제(--force)를 하면 OrbStack의 컨테이너 엔진이 미처 종료하지 못해 
+                # UI에 "좀비(Orphan)" 컨테이너로 남습니다.
+                # 따라서 Finalizer만 제거하고 Kubernetes가 정상적으로 죽이도록 유도합니다.
+                if kubectl get pod airflow-redis-0 -n airflow >/dev/null 2>&1; then
+                    kubectl patch pod airflow-redis-0 -n airflow -p '{"metadata":{"finalizers":null}}' 2>/dev/null || true
+                fi
+            fi
+            
             kubectl delete sparkapplications --all -n "$ns" 2>/dev/null || true
+            
+            # PVC 강제 삭제 및 Finalizer 제거 (PVC Terminating 멈춤 방지)
+            kubectl patch pvc --all -n "$ns" -p '{"metadata":{"finalizers":null}}' 2>/dev/null || true
+            kubectl delete pvc --all -n "$ns" --force --grace-period=0 2>/dev/null || true
         fi
     done
-    echo -e "${C_YELLOW}All workloads scaled to 0.${C_RESET}"
+    
+    # 볼륨 전체(PV) 정보까지 모두 무조건 삭제
+    kubectl delete pv --all 2>/dev/null || true
+    echo -e "${C_YELLOW}All workloads scaled to 0, and PVCs/PVs wiped clean.${C_RESET}"
 }
 
 # ── Deploy (Helm install/upgrade) ──────────────────────────────────────────────
@@ -315,8 +331,9 @@ function deploy_charts() {
 
         echo "  Installing $release using $chart..."
         if [[ "$chart" == *"spark-operator"* ]]; then
+            # Spark Operator 2.4.0 호환성 이슈로 인해 2.3.0으로 버전 고정
             helm upgrade --install "$release" "$chart" \
-                -n "$namespace" -f "$values" --set webhook.enable=true
+                -n "$namespace" -f "$values" --set webhook.enable=true --version 2.3.0
         else
             helm upgrade --install "$release" "$chart" \
                 -n "$namespace" -f "$values"
