@@ -47,8 +47,18 @@ triggerer:
 dagProcessor:
   enabled: true
 
+# migrateDatabaseJob 및 createUserJob 강화
 migrateDatabaseJob:
-  enabled: true
+  useHelmHooks: false  # 디버깅을 위해 Hook 대신 일반 Job으로 생성
+  ttlSecondsAfterFinished: 600
+
+createUserJob:
+  useHelmHooks: false
+  # 기본 관리자 계정 설정 (필요시)
+  # username: admin
+  # password: admin
+  # role: Admin
+  # email: admin@example.com
 
 # -------------------------------------------------------------
 # 로컬 개발 환경 설정: HostPath Mount
@@ -69,3 +79,8 @@ volumeMounts:
 apiServer:
   service:
     type: LoadBalancer
+
+webserver:
+  enabled: true
+  service:
+    type: LoadBalancer # Airflow 3.0+ 에서 UI 서비스

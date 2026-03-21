@@ -31,6 +31,8 @@ spec:
           args:
             - --class
             - org.apache.spark.sql.hive.thriftserver.HiveThriftServer2
+            - --name
+            - "Spark Thrift Server (Iceberg)"
             - --master
             - local[*]
             - --packages
@@ -40,17 +42,17 @@ spec:
             - --conf
             - spark.sql.extensions=org.apache.iceberg.spark.extensions.IcebergSparkSessionExtensions,org.projectnessie.spark.extensions.NessieSparkSessionExtensions
             - --conf
-            - spark.sql.catalog.nessie=org.apache.iceberg.spark.SparkCatalog
+            - spark.sql.catalog.iceberg=org.apache.iceberg.spark.SparkCatalog
             - --conf
-            - spark.sql.catalog.nessie.uri=http://nessie.nessie.svc.cluster.local:19120/api/v1
+            - spark.sql.catalog.iceberg.uri=http://nessie.nessie.svc.cluster.local:19120/api/v1
             - --conf
-            - spark.sql.catalog.nessie.ref=main
+            - spark.sql.catalog.iceberg.ref=main
             - --conf
-            - spark.sql.catalog.nessie.warehouse=s3://iceberg-data/
+            - spark.sql.catalog.iceberg.warehouse=s3://iceberg-data/
             - --conf
-            - spark.sql.catalog.nessie.catalog-impl=org.apache.iceberg.nessie.NessieCatalog
+            - spark.sql.catalog.iceberg.catalog-impl=org.apache.iceberg.nessie.NessieCatalog
             - --conf
-            - spark.sql.catalog.nessie.io-impl=org.apache.iceberg.aws.s3.S3FileIO
+            - spark.sql.catalog.iceberg.io-impl=org.apache.iceberg.aws.s3.S3FileIO
             - --conf
             - spark.hadoop.fs.s3a.endpoint=http://minio.minio.svc.cluster.local:9000
             - --conf
@@ -64,17 +66,17 @@ spec:
             - --conf
             - spark.hadoop.fs.s3a.aws.credentials.provider=org.apache.hadoop.fs.s3a.SimpleAWSCredentialsProvider
             - --conf
-            - spark.sql.catalog.nessie.client.region=us-east-1
+            - spark.sql.catalog.iceberg.client.region=us-east-1
             - --conf
-            - spark.sql.catalog.nessie.s3.endpoint=http://minio.minio.svc.cluster.local:9000
+            - spark.sql.catalog.iceberg.s3.endpoint=http://minio.minio.svc.cluster.local:9000
             - --conf
-            - spark.sql.catalog.nessie.s3.path-style-access=true
+            - spark.sql.catalog.iceberg.s3.path-style-access=true
             - --conf
-            - spark.sql.catalog.nessie.s3.access-key-id=admin
+            - spark.sql.catalog.iceberg.s3.access-key-id=admin
             - --conf
-            - spark.sql.catalog.nessie.s3.secret-access-key=password
+            - spark.sql.catalog.iceberg.s3.secret-access-key=password
             - --conf
-            - spark.sql.catalog.nessie.s3.region=us-east-1
+            - spark.sql.catalog.iceberg.s3.region=us-east-1
             - --conf
             - spark.driver.bindAddress=0.0.0.0
             - --conf

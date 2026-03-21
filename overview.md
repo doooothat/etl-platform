@@ -1,169 +1,92 @@
-# ETL 플랫폼 구조/절차/연결/설정 (로컬 기준)
+# 🚀 Modern ETL Platform Overview (Local K8s)
 
-## 1) 구조 트리 (로컬 기준, 핵심 리소스)
+본 프로젝트는 **Airflow**, **Spark**, **Trino**, **Nessie**, **Iceberg**, **MinIO**, **Superset**을 결합한 최신형 데이터 레이크하우스(Lakehouse) 아키텍처의 로컬 실습 환경입니다.
 
-```
-Cluster (Local Kubernetes: Orbstack)
-├── Namespace: airflow
-│   ├── Deployment: airflow-webserver
-│   │   └── Pod: airflow-webserver-xxxxx
-│   │       └── Container: airflow-webserver
-│   ├── Deployment: airflow-scheduler
-│   │   └── Pod: airflow-scheduler-xxxxx
-│   │       └── Container: airflow-scheduler
-│   ├── Deployment: airflow-worker
-│   │   └── Pod: airflow-worker-xxxxx
-│   │       └── Container: airflow-worker
-│   └── Service: airflow-webserver (LoadBalancer: 8080)
-│
-├── Namespace: spark
-│   ├── Deployment: spark-operator
-│   │   └── Pod: spark-operator-xxxxx
-│   │       └── Container: spark-operator-controller
-│   └── SparkApplication: iceberg-nessie-restore
-│       ├── Pod: spark-driver
-│       │   └── Container: spark-driver
-│       └── Pod: spark-executor
-│           └── Container: spark-executor
-│
-├── Namespace: minio
-│   ├── Deployment: minio
-│   │   └── Pod: minio-0
-│   │       └── Container: minio
-│   ├── Service: minio (LoadBalancer: 9000)
-│   └── Service: minio-console (LoadBalancer: 9001)
-│
-├── Namespace: nessie
-│   ├── Deployment: nessie
-│   │   └── Pod: nessie-xxxxx
-│   │       └── Container: nessie
-│   └── Service: nessie (ClusterIP: 19120)
-│
-├── Namespace: trino
-│   ├── Deployment: trino-coordinator
-│   │   └── Pod: trino-coordinator-xxxxx
-│   │       └── Container: trino
-│   └── Service: trino (LoadBalancer: 18080)
-│
-└── Namespace: superset
-    ├── Deployment: superset
-    │   └── Pod: superset-xxxxx
-    │       └── Container: superset-webserver
-    ├── Deployment: superset-postgresql (metadata DB only)
-    │   └── Pod: superset-postgresql-xxxxx
-    │       └── Container: postgres
-    └── Service: superset (LoadBalancer: 8088)
+---
+
+## 🏗️ 1. 아키텍처 다이어그램 (Logical Flow)
+
+```mermaid
+graph TD
+    subgraph Data_Storage
+        MinIO[(MinIO S3)]
+        Nessie[Nessie Catalog]
+    end
+
+    subgraph Processing_Layer
+        Spark[Spark Thrift Server]
+        Trino[Trino Engine]
+    end
+
+    subgraph Orchestration_Visualization
+        Airflow[Airflow 2.10+]
+        Superset[Apache Superset]
+    end
+
+    Airflow -- "Spark Job" --> Spark
+    Spark -- "Iceberg V2" --> MinIO
+    Spark -- "Metadata" --> Nessie
+    
+    Trino -- "Query Engine" --> MinIO
+    Trino -- "Metadata" --> Nessie
+    
+    Superset -- "SQL Lab" --> Trino
+    Superset -- "Analytics" --> Trino
 ```
 
-> **샘플 데이터**: Superset 빌트인 SQLite 예제 대신, Spark Job이 Iceberg/Nessie에 ecommerce
-> 데이터셋(customers, products, orders)을 적재하고 Superset은 Trino를 통해 쿼리합니다.
+---
 
-## 2) 외부 접속 경로 (로컬, LoadBalancer 기준)
+## 🛠️ 2. 구성 요소 상세 (로컬/내부 정보)
 
-```
-Airflow UI    → http://localhost:8080
-Superset UI   → http://localhost:8088
-Trino         → http://localhost:18080
-MinIO API     → http://localhost:9000
-MinIO Console → http://localhost:9001
-```
+| 컴포넌트 | 역할 | 내부 DNS (Service) | 포트 | 외부 접속 URL |
+| :--- | :--- | :--- | :--- | :--- |
+| **Airflow** | 워크플로우 관리 | `airflow-webserver.airflow.svc` | 8080 | [http://localhost:8080](http://localhost:8080) |
+| **Spark STS** | SQL 가공 및 적재 | `spark-thrift-server.spark.svc` | 10000 | `jdbc:hive2://localhost:10000` |
+| **Trino** | 고속 쿼리 엔진 | `trino.trino.svc` | 8080 | [http://localhost:18080](http://localhost:18080) |
+| **Nessie** | Git-like 카탈로그 | `nessie.nessie.svc` | 19120 | 내부 전용 (REST API) |
+| **MinIO** | 객체 스토리지 | `minio.minio.svc` | 9000/1 | [http://localhost:9001](http://localhost:9001) |
+| **Superset** | BI 및 시각화 | `superset.superset.svc` | 8088 | [http://localhost:8088](http://localhost:8088) |
 
-## 3) 내부 연결 흐름 (정확한 DNS/포트 기준)
+---
 
-```
-Airflow → Spark (SparkApplication 실행)
+## ⚡ 3. 인프라 및 데이터 관리 (`manage-project.sh`)
 
-Spark → Nessie REST Catalog
-  http://nessie.nessie.svc.cluster.local:19120/api/v1
+모든 리소스는 의존성에 따라 **순차적으로 관리**됩니다.
 
-Spark → MinIO S3
-  http://minio.minio.svc.cluster.local:9000
-  bucket: iceberg-data
-  accessKey: admin
-  secretKey: password
+### 실행 명령어
+*   `./manage-project.sh start`: **[권장]** 의존성에 따른 5단계 순차 기동 및 데이터 자동 적재
+*   `./manage-project.sh stop`: 리소스 절약을 위해 모든 워크로드 정지 (Scale 0)
+*   `./manage-project.sh status`: 전체 컴포넌트의 가동 상태 확인
+*   `./manage-project.sh deploy`: Helm 차트 및 설정 파일 재배포
 
-Trino → Nessie REST Catalog
-  http://nessie.nessie.svc.cluster.local:19120/iceberg/main
-  http://nessie.nessie.svc.cluster.local:19120/iceberg/dev
+### 🔄 순차 기동 로직 (Stage 0 ~ 5)
+1.  **Stage 0**: KEDA (오토스케일러) 기동
+2.  **Stage 1**: MinIO 기동 및 `iceberg-data` 버킷 자동 생성
+3.  **Stage 2**: Nessie & Spark Operator 기동 (MinIO 의존성)
+4.  **Stage 3**: Trino & Spark Thrift Server 기동 (Nessie 의존성) + **Spark Job으로 샘플 데이터 적재**
+5.  **Stage 4**: Airflow & Superset 기동 및 **DB 마이그레이션/초기화**
+6.  **Stage 5**: **데이터 통합 마무리** (`init_data.sh` 자동 실행 - Superset DB 연결 등)
 
-Trino → MinIO S3
-  http://minio.minio.svc.cluster.local:9000
-  accessKey: admin
-  secretKey: password
-  region: us-east-1
+---
 
-Superset → Metadata DB (Helm 내장 PostgreSQL)
-  postgresql://superset:superset@superset-postgresql:5432/superset
+## 📊 4. 데이터 조회 가이드 (DBeaver 기준)
 
-Superset → Analytics Data (Trino 경유)
-  trino://trino@trino.trino.svc.cluster.local:8080/nessie
-  (Trino가 Nessie catalog를 통해 Iceberg 테이블 쿼리)
-  Tables: nessie.ecommerce.customers / products / orders
-```
+### 카탈로그 통합 네이밍
+*   Spark와 Trino 모두 **`iceberg`**라는 이름의 카탈로그를 사용합니다.
+*   샘플 데이터 위치: `iceberg.ecommerce.customers`, `iceberg.ecommerce.products`, `iceberg.ecommerce.orders`
 
-## 4) 서비스/포트/크리덴셜 요약표
+### DBeaver 연결 팁
+1.  **Trino (localhost:18080)**: 메타데이터 탐색기(Tree)를 통해 테이블 구조를 시각적으로 확인하기에 최적화되어 있습니다.
+2.  **Spark (localhost:10000)**: 
+    *   Thrift Server의 한계로 인해 탐색기 트리에는 `iceberg` 카탈로그가 보이지 않을 수 있습니다.
+    *   **해결책**: 연결 설정의 `Bootstrap Queries`에 `USE iceberg;`를 등록하거나, SQL 편집기에서 직접 쿼리하시면 정상 조회됩니다.
 
-| 컴포넌트             | 내부 DNS                                                    | 포트  | 외부 접속                | 계정                      |
-|----------------------|-------------------------------------------------------------|-------|--------------------------|---------------------------|
-| Airflow Webserver    | `airflow-webserver.airflow.svc.cluster.local`               | 8080  | `http://localhost:8080`  | 기본 admin (Helm init)    |
-| MinIO API            | `minio.minio.svc.cluster.local`                             | 9000  | `http://localhost:9000`  | `admin` / `password`      |
-| MinIO Console        | `minio-console.minio.svc.cluster.local`                     | 9001  | `http://localhost:9001`  | `admin` / `password`      |
-| Nessie               | `nessie.nessie.svc.cluster.local`                           | 19120 | 내부 전용                | N/A                       |
-| Superset             | `superset.superset.svc.cluster.local`                       | 8088  | `http://localhost:8088`  | `admin` / `admin`         |
-| Superset Metadata DB | `superset-postgresql.superset.svc.cluster.local`            | 5432  | 내부 전용                | `superset` / `superset`   |
-| Trino                | `trino.trino.svc.cluster.local`                             | 8080  | `http://localhost:18080` | N/A                       |
+---
 
-## 5) 인프라 관리 명령어
+## 📝 5. 핵심 설정 파일 위치
+*   **Airflow**: `airflow/custom-values.yaml`
+*   **Spark STS**: `spark/spark-thrift-server.yaml`
+*   **Trino**: `trino/values.yaml`
+*   **운영 로직**: `manage-project.sh`, `init_data.sh`
 
-> 브랜치: `feat/infra-lifecycle-management`
-
-### manage-project.sh
-
-| 명령어 | 설명 |
-|--------|------|
-| `./manage-project.sh start` | 모든 워크로드 스케일 업 (replicas=1) |
-| `./manage-project.sh stop` | 모든 워크로드 스케일 다운 (replicas=0, 리소스 절약) |
-| `./manage-project.sh status` | 전체 서비스 상태 확인 |
-| `./manage-project.sh deploy` | 안전 배포 (helm upgrade --install, 멱등) |
-| `./manage-project.sh deploy --force` | 파괴적 재배포 (uninstall → install) |
-| `./manage-project.sh teardown` | 모든 Helm release 삭제 (역순) |
-| `./manage-project.sh rebuild` | teardown → deploy → init_data.sh 한 번에 실행 |
-| `./manage-project.sh shutdown` | OrbStack 엔진 중지 |
-
-### 배포 순서 (의존성 기반 3단계)
-
-```
-1단계 (인프라):   MinIO, Nessie, Analytics DB
-2단계 (데이터):   Spark Operator, Trino
-3단계 (앱):       Airflow, Superset
-```
-
-각 단계 배포 후 readiness 헬스체크 통과해야 다음 단계로 진행.
-
-### init_data.sh (데이터 초기화)
-
-deploy 완료 후 실행. 플랫폼을 working 상태로 만드는 단일 스크립트.
-
-```
-Step 1: 코어 서비스 readiness 대기 (Nessie, MinIO)
-Step 2: Spark Job으로 Iceberg/Nessie 샘플 데이터 생성
-        → nessie.ecommerce.{customers, products, orders}
-Step 3: Superset API로 Trino DB 연결 자동 등록
-        → trino://trino@trino.trino.svc.cluster.local:8080/nessie
-```
-
-### 일반적인 운영 시나리오
-
-```bash
-# 리소스 절약을 위해 중지
-./manage-project.sh stop
-
-# 다시 사용할 때
-./manage-project.sh start
-
-# 환경이 꼬였을 때 (완전 재구축)
-./manage-project.sh rebuild
-
-# OrbStack 리소스 전부 해제
-./manage-project.sh teardown
-```
+> **주의**: 본 환경의 모든 데이터베이스(PostgreSQL, Redis 등)는 **휘발성(Ephemeral)**입니다. OrbStack이나 서비스를 재시작할 경우 데이터가 초기화되지만, `./manage-project.sh start` 명령어가 이를 감지하여 자동으로 관리자 계정 생성 및 샘플 데이터 복구를 진행합니다.
