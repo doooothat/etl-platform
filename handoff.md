@@ -1,37 +1,40 @@
-# AI Agent Handoff
+# 🤝 AI Agent Handoff (Finalized Session)
 
-*마지막 업데이트: 2026-03-15 (by Claude Code)*
+이 문서는 Antigravity 세션 종료 시점의 프로젝트 상태와 다음 작업자를 위한 가이드를 담고 있습니다.
 
-## 🎯 현재 목표 (Current Objective)
-- 코드베이스 전체 점검 및 handoff 프로토콜 설정 완료
+## 🕒 마지막 업데이트
+- **일시**: 2026-03-21T14:18:09+09:00
+- **상태**: 로컬 K8s(Orbstack) 기반 ETL 플랫폼 구축 및 자동화 완료
 
-## ✅ 직전 완료된 작업 (Completed Work)
-- [Claude Code] `test.py` 삭제 완료
-- [Claude Code] 코드베이스 전체 점검 완료:
-  - 핵심 관리 스크립트 검증 (manage-project.sh, init_data.sh)
-  - 6개 서비스 설정 파일 검토 (Airflow, MinIO, Nessie, Spark, Superset, Trino)
-  - Airflow DAGs 3개 검증 (hello_world, cpu_stress, complex_pipeline)
-  - Spark 작업 정의 3개 검증 (spark-pi, iceberg-nessie-restore, thrift-server)
-  - Git 이력 및 브랜치 확인
-- [Claude Code] Handoff Protocol 설정 완료:
-  - 프로젝트 메모리 파일(MEMORY.md)에 handoff 규칙 추가
-  - 전역 settings.json에 이미 적용된 규칙 확인 완료
+## 🛠️ 주요 작업 완료 사항
 
-## 🚧 현재 상태 및 이슈 (Current State & Known Issues)
-- **잠재적 개선 사항**:
-  1. DAG 스케줄 빈도가 높음 (cpu_stress: 5분, complex_pipeline: 1분) → 로컬 환경 리소스 고려 필요
-  2. Spark 버전 불일치 (4.1.1 vs 3.5.4) → Iceberg 호환성 이유로 추정, 문서화 권장
-  3. `feat/infra-lifecycle-management` 브랜치 존재 → 리뷰 및 병합 고려
-- **보안**: 로컬 개발용으로 하드코딩된 credentials (프로덕션 배포 시 Secrets 관리 필요)
+### 1. Spark Thrift Server & Iceberg 연동
+- **설정**: `spark/spark-thrift-server.yaml` 업데이트
+- **클래스 로딩**: `org.apache.iceberg.spark.SparkCatalog` 및 Nessie 확장 기능 정상 로드 확인
+- **명명 규칙**: Spark와 Trino의 카탈로그 이름을 `iceberg`로 통일하여 쿼리 일관성 확보
 
-## 📊 코드베이스 상태 요약
-- **아키텍처**: Helm 기반 표준화, 8개 서비스 통합 관리
-- **데이터 지속성**: 전체 ephemeral (의도된 설계)
-- **문서화**: 우수 (CLAUDE.md, overview.md, MEMORY.md 완비)
-- **코드 품질**: 로컬 개발 환경에 최적화, 프로덕션 준비 단계는 아님
-- **Handoff 설정**: 전역 + 프로젝트별 이중 보호 완료
+### 2. 순차적 기동 로직 구현 (`manage-project.sh`)
+- **Stage 0~3**: 인프라(MinIO, Nessie) → 처리 레이어(Trino, Spark) 순서로 의존성 기반 기동
+- **Stage 4~5**: 앱 레이어(Airflow, Superset) 기동 및 **자동 데이터 적재/연동**
+- **데이터 무결성**: PostgreSQL/Redis가 휘발성임을 고려하여, 기동 시마다 DB 마이그레이션과 초기화 작업을 강제 수행하도록 설계
 
-## ➡️ 다음 작업자에게 넘길 할 일 (Next Steps/TODOs)
-- [ ] (선택) DAG 스케줄 조정 또는 기본 pause 설정 검토
-- [ ] (선택) `feat/infra-lifecycle-management` 브랜치 리뷰
-- [ ] 다음 기능 개발 또는 운영 작업 계획
+### 3. 데이터 적재 자동화 (`init_data.sh`)
+- 기동 마지막 단계에 자동으로 호출되어 다음 작업을 수행:
+  - Spark Job 실행 → Iceberg 샘플 데이터 적재 (ecommerce 세트)
+  - Superset DB 연결 자동 등록 (SQL Lab에서 즉시 조회 가능)
+
+## 📊 현재 시스템 상태
+- **Airflow**: [http://localhost:8080](http://localhost:8080) (기동 완료)
+- **Superset**: [http://localhost:8088](http://localhost:8088) (admin/admin, Trino 연동 완료)
+- **Trino**: [http://localhost:18080](http://localhost:18080) (Nessie/Iceberg 트리 조회 최적화)
+- **Spark STS**: `jdbc:hive2://localhost:10000` (Iceberg SQL 가공 가능)
+
+## 🚀 다음 작업자 TODO (Next Steps)
+
+1.  **Airflow DAG 테스트**: `complex_pipeline.py` 등 실제 파이프라인을 트리거하여 Iceberg 데이터가 주기적으로 갱신되는지 모니터링
+2.  **데이터 보존 검토**: 현재는 모든 DB가 휘발성입니다. 필요 시 `custom-values.yaml`에서 `persistence.enabled: true` 및 PV 설정을 고려하세요.
+3.  **브랜칭 실습**: Nessie의 장점인 'Git-like branching' 기능을 활용하여 `dev` 브랜치에서 데이터를 가공하고 `main`으로 머지하는 시나리오를 Spark/Trino에서 테스트해보세요.
+4.  **DBeaver 최적화**: 사용자 가이드(overview.md)에 따라 DBeaver의 Bootstrap Queries 설정을 통해 Spark STS 사용성을 개선하세요.
+
+---
+*본 문서는 Antigravity에 의해 세션 종료 시점에 작성되었습니다.*
