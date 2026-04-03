@@ -284,16 +284,31 @@ function stop_all() {
     for ns in "${NAMESPACES[@]}"; do
         if kubectl get ns "$ns" >/dev/null 2>&1; then
             echo "  --- $ns ---"
+            
+            # Monitoring 프로메테우스 부활(Reconcile) 원천 차단
+            if [[ "$ns" == "monitoring" ]]; then
+                # scale_ns 전에 CRD 레벨에서 0으로 못 박아야 오퍼레이터가 다시 살리지 않음
+                kubectl patch prometheus prometheus-kube-prometheus-prometheus -n monitoring --type='merge' -p '{"spec": {"replicas": 0}}' 2>/dev/null || true
+            fi
+
             scale_ns "$ns" 0
             
             # Airflow Redis Pod가 finalizer로 인해 Terminating 상태에서 영구적으로 멈추는 고질적 문제 해결
             if [[ "$ns" == "airflow" ]]; then
-                # 그냥 강제 삭제(--force)를 하면 OrbStack의 컨테이너 엔진이 미처 종료하지 못해 
-                # UI에 "좀비(Orphan)" 컨테이너로 남습니다.
-                # 따라서 Finalizer만 제거하고 Kubernetes가 정상적으로 죽이도록 유도합니다.
                 if kubectl get pod airflow-redis-0 -n airflow >/dev/null 2>&1; then
                     kubectl patch pod airflow-redis-0 -n airflow -p '{"metadata":{"finalizers":null}}' 2>/dev/null || true
+                    # K8s 강제 삭제 (Terminating 탈출용)
+                    kubectl delete pod airflow-redis-0 -n airflow --force --grace-period=0 2>/dev/null || true
                 fi
+                # OrbStack(Docker) 내부 엔진 레벨에서 프로세스가 죽지 않는 좀비 현상(Orphan) 물리적 박멸
+                if command -v docker >/dev/null 2>&1; then
+                    docker ps -q --filter "name=airflow-redis" | xargs -r docker rm -f 2>/dev/null || true
+                fi
+            fi
+
+            # Monitoring의 경우 한 번 더 쐐기 (Operator 딜레이로 인한 부활시 직접 셧다운)
+            if [[ "$ns" == "monitoring" ]]; then
+                kubectl scale statefulset prometheus-prometheus-kube-prometheus-prometheus -n monitoring --replicas=0 2>/dev/null || true
             fi
             
             kubectl delete sparkapplications --all -n "$ns" 2>/dev/null || true
