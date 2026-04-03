@@ -1,0 +1,95 @@
+# kube-prometheus-stack: Lightweight local configuration
+# Focused on minimizing resource usage for OrbStack environments.
+
+## Alertmanager: Disabled (Not needed for local development)
+alertmanager:
+  enabled: false
+
+## Grafana: Enabled (Essential for visualization)
+grafana:
+  enabled: true
+  adminPassword: "admin" # 기본 비밀번호 설정
+  # 서비스 포트를 80 대신 3000으로 변경 및 로드밸런서 타입으로 지정
+  service:
+    type: LoadBalancer
+    port: 3000
+    targetPort: 3000
+  # 리소스 제한 (경량화)
+  resources:
+    requests:
+      cpu: 100m
+      memory: 128Mi
+    limits:
+      cpu: 200m
+      memory: 256Mi
+
+## Kubernetes Control Plane Metrics: Disabled (To save resources)
+kubeApiServer:
+  enabled: false
+kubeLet:
+  enabled: false
+kubeControllerManager:
+  enabled: false
+coreDns:
+  enabled: false
+kubeEtcd:
+  enabled: false
+kubeScheduler:
+  enabled: false
+kubeProxy:
+  enabled: false
+
+## Node Exporter: Disabled (Redundant for OrbStack 1-node environment)
+nodeExporter:
+  enabled: false
+
+## Kube State Metrics: Enabled (Crucial for monitoring Pod CPU/Memory)
+kube-state-metrics:
+  enabled: true
+  resources:
+    requests:
+      cpu: 50m
+      memory: 64Mi
+    limits:
+      cpu: 100m
+      memory: 128Mi
+
+## Prometheus Operator / Prometheus Server
+prometheusOperator:
+  enabled: true
+  resources:
+    requests:
+      cpu: 50m
+      memory: 64Mi
+    limits:
+      cpu: 100m
+      memory: 128Mi
+
+prometheus:
+  enabled: true
+  prometheusSpec:
+    # 데이터 보존 기간을 짧게 설정하여 스토리지 및 메모리 확보
+    retention: 1d
+    retentionSize: "2GB"
+    # 수집 주기를 늘려 CPU 스파이크를 줄임
+    scrapeInterval: "30s"
+    evaluationInterval: "30s"
+    
+    # 임시 스토리지 구성 (재시작 시 초기화, 로컬 환경)
+    storageSpec:
+      emptyDir:
+        medium: "Memory"
+        sizeLimit: 1Gi
+
+    # Prometheus 메모리/CPU 캡 설정
+    resources:
+      requests:
+        cpu: 200m
+        memory: 512Mi
+      limits:
+        cpu: 500m
+        memory: 1024Mi # 1GB 제한으로 타 엔진 OOM 보호
+
+# 기본 제공되는 무거운 알람 룰 모두 끄기
+defaultRules:
+  create: false

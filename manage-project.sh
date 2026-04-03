@@ -49,9 +49,10 @@ RELEASES=(
     "spark-operator:spark:spark-operator/spark-operator:./spark/custom-values.yaml"
     "superset:superset:./superset/superset:./superset/custom-values.yaml"
     "trino:trino:./trino:./trino/values.yaml"
+    "prometheus:monitoring:prometheus-community/kube-prometheus-stack:./monitoring/custom-values.yaml"
 )
 
-NAMESPACES=("keda" "airflow" "minio" "nessie" "spark" "superset" "trino")
+NAMESPACES=("keda" "airflow" "minio" "nessie" "spark" "superset" "trino" "monitoring")
 
 # ── Helpers ────────────────────────────────────────────────────────────────────
 
@@ -253,6 +254,16 @@ function start_ordered() {
         || log_err "Data initialization failed. Please run ./init_data.sh manually."
 
     # ────────────────────────────────────────────────────────────────
+    # Stage 6: Monitoring (Prometheus & Grafana)
+    # ────────────────────────────────────────────────────────────────
+    log_stage "Stage 6: Monitoring (Prometheus & Grafana)"
+    scale_ns monitoring 1 deployments
+    kubectl wait --for=condition=available --timeout=120s \
+        deployment/prometheus-grafana -n monitoring 2>/dev/null \
+        && log_ok "Grafana is ready." \
+        || log_info "Grafana still starting..."
+
+    # ────────────────────────────────────────────────────────────────
     # Done
     # ────────────────────────────────────────────────────────────────
     echo ""
@@ -264,6 +275,7 @@ function start_ordered() {
     echo -e "  Superset → http://localhost:8088  (admin / admin)"
     echo -e "  Trino    → http://localhost:18080"
     echo -e "  MinIO    → http://localhost:9001  (admin / password)"
+    echo -e "  Grafana  → http://localhost:3000  (admin / admin)"
 }
 
 # ── Stop (all at once, order doesn't matter) ───────────────────────────────────

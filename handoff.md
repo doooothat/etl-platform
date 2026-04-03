@@ -3,9 +3,9 @@
 이 문서는 세션 종료 시점의 프로젝트 상태와 다음 작업자를 위한 가이드를 담고 있습니다.
 
 ## 🕒 마지막 업데이트
-- **일시**: 2026-03-22T00:50:00+09:00
+- **일시**: 2026-04-03T22:35:00+09:00
 - **에이전트**: Antigravity (Google Deepmind)
-- **상태**: Trino-Nessie 연동 문제 완벽 해결 및 manage-project.sh 셧다운(Stop) 로직 고도화
+- **상태**: 기존 시스템 완벽 구동 확인 완료 및 프로메테우스+그라파나(경량화) 생태계 통합 추가
 
 ## 🛠️ 금일 작업 완료 사항
 
@@ -25,10 +25,17 @@
   - 이미 남겨진 좀비 컨테이너는 호스트 도커를 통해 `docker rm -f`로 수동 박멸함.
 - **Spark Operator 버전 락인(Pin)**: `deploy` 수행 시 버전을 명시하지 않아, 버그가 있는 2.4.0이 재설치되며 과거의 CrashLoopBackOff에 빠지던 문제를 방지하기 위해 헬름 배포 구문에 `--version 2.3.0`을 하드코딩함.
 
+### 3. 모니터링 스택(Prometheus + Grafana) 추가 적용 구축 (2026-04-03)
+- **로컬 최적화(경량화) 버전 배포**: OrbStack의 유휴 자원(잔여 가용 RAM ~4GB)을 고려하여 `kube-prometheus-stack`을 극히 가벼운 버전으로 재설계.
+  - `custom-values.yaml` 작성 (`monitoring` 디렉토리 내).
+  - AlertManager, NodeExporter 사용 중지 및 Prometheus Storage 1Day(In-Memory) 유지.
+- **포트 충돌 및 로컬 매핑 대응**: Grafana 접속 설정을 고도화하여 포트 80 대신 `3000`번 포트에서 `LoadBalancer` 방식으로 즉각적으로 노출 완료(`http://localhost:3000` / admin : admin).
+- **자동 기동 스크립트 연동 완료**: `manage-project.sh`의 Deploy & Start 로직(Stage 6)에 가장 마지막으로 Grafana가 기동되도록 통합 완료.
+
 ## 📊 현재 시스템 상태
 
-### 실행 중인 서비스 (All Stopped)
-현재 모든 워크로드는 사용자의 명령(`stop`)에 의해 **레플리카 0(또는 완전 삭제)**로 클린하게 내려진 상태이며, 볼륨조차 소멸된 깨끗한 `Zero State`입니다. 작업 재개 시 `./manage-project.sh start` 명령을 입력하면 모든 데이터가 샘플링되고 시스템이 완벽한 의존성 순서대로 재기동됩니다.
+### 실행 중인 서비스 (All Running)
+모든 컴포넌트 오류가 해결된 것을 넘어선 상태로, 사용자에 의해 `manage-project.sh start` 명령을 통해 모든 워크포스가 완벽한 의존성 구조를 기반으로 Full 구동 중입니다. (Airflow, Superset, Trino, MinIO, Spark Operator, 그리고 Prometheus + Grafana 까지 모두 레디스 상태 확인됨)
 
 ### 주요 인프라 특성
 - **데이터 휘발성**: 모든 DB/Storage는 `persistence.enabled: false` (ephemeral)이며 스크립트 단에서도 PVC를 영구적으로 박멸합니다.
@@ -67,9 +74,9 @@
 
 ## 📝 다음 세션 작업 제안
 
-1. **파이프라인 구축 시작**: 모든 컴포넌트 오류가 해결되고 트리노 조회까지 연동이 완료되었습니다! 다음 세션부터는 곧바로 Airflow DAG를 통한 데이터 적재 처리를 개발하시면 됩니다.
-2. **Superset 메인 대시보드 기획**: Airflow가 쏴주는 고객 정보를 연동 받아 실시간 차트를 구성하는 것을 권장합니다.
-3. PVC가 강제로 사라지게 된 점을 인지하시고, 다음 세션에서 영구 보존이 필요한 저장소 설계가 논의될 경우 `stateful`로 정책을 일부 토글하세요.
+1. **파이프라인 구축 시작**: 모든 ETL 베이스라인과 모니터링 컴포넌트까지 완벽하게 기동 중입니다! 다음 세션부터는 Airflow DAG를 통한 데이터 적재/집계 파이프라인(ETL)을 실질적으로 개발해볼 수 있습니다.
+2. **Superset 메인 대시보드 기획**: Airflow가 가공한 Iceberg 테이블 통계를 Trino를 통해 Superset에서 어떻게 구성할지 대시보드 작성을 시작해보면 좋습니다.
+3. **Unity Catalog OSS(Databricks 버전) 도입 검토**: 오늘 세션 초반에 검토한대로, 2026년 최신 트렌드인 Databricks의 `Delta Lake 4.x + Unity Catalog OSS` 스택으로의 변경(마이그레이션) POC 구성을 진행해볼 수도 있습니다!
 
 ---
-*본 문서는 Antigravity 에 의해 2026-03-22 세션 종료 시점에 최신화되어 기록되었습니다.*
+*본 문서는 Antigravity 에 의해 2026-04-03 세션 종료 시점에 최신화되어 기록되었습니다.*
