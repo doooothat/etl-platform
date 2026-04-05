@@ -11,7 +11,7 @@ image:
 # 1. Controller Settings
 controller:
   replicas: 1
-  # 리소스 제한 (로컬 환경 맞춤)
+  # Resource limits (local environment)
   resources:
     limits:
       cpu: 200m
@@ -20,20 +20,20 @@ controller:
       cpu: 100m
       memory: 256Mi
 
-  # Webhook 활성화 (SparkApplication 검증/변조용)
+  # Enable Webhook (SparkApplication validation/mutation)
   webhook:
     enable: true
 
 # 2. Spark Job Namespaces
 spark:
-  # Spark Operator가 감시할 네임스페이스 목록
-  # 여기에 'spark'를 추가해야 해당 네임스페이스의 작업을 관리함
+  # List of namespaces watched by Spark Operator
+  # Must include 'spark' to manage jobs in that namespace
   jobNamespaces:
     - "spark"
     - "airflow"
     - "default"
 
-  # Spark Job 실행 시 사용할 ServiceAccount 자동 생성
+  # Automatically create ServiceAccount for Spark Jobs
   serviceAccount:
     create: true
     name: "spark-operator-sa"
@@ -53,4 +53,4 @@ webhook:
 # 4. Metrics
 prometheus:
   metrics:
-    enable: false # 로컬에서는 일단 꺼둠 (필요시 켬)
+    enable: false # Disabled for local environment (enable if needed)

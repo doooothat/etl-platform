@@ -13,7 +13,7 @@ echo "🔄 Starting Data Initialization for ETL Platform..."
 echo "   $(date '+%Y-%m-%d %H:%M:%S')"
 
 # ==============================================================================
-# Step 1. MinIO 대기 + iceberg-data 버킷 생성
+# Step 1: MinIO - Wait & Create iceberg-data bucket
 # ==============================================================================
 step "Step 1: MinIO - Waiting & Creating bucket..."
 
@@ -28,7 +28,7 @@ kubectl exec -n minio deploy/minio -- bash -c "
 " && ok "Bucket 'iceberg-data' is ready." || warn "Bucket creation failed, Nessie may fail health check."
 
 # ==============================================================================
-# Step 2. Nessie 대기 (버킷이 있어야 health check 통과)
+# Step 2: Nessie - Wait (Requires bucket for health check)
 # ==============================================================================
 step "Step 2: Nessie - Waiting for health check..."
 
@@ -37,7 +37,7 @@ kubectl wait --for=condition=available --timeout=120s deployment/nessie -n nessi
 ok "Nessie is ready."
 
 # ==============================================================================
-# Step 3. Iceberg + Nessie 샘플 데이터 생성 (Spark Job)
+# Step 3: Iceberg + Nessie Sample Data (Spark Job)
 # ==============================================================================
 step "Step 3: Spark Job - Creating Iceberg sample data (ecommerce dataset)..."
 
@@ -75,7 +75,7 @@ if [ "$SPARK_SUCCESS" = false ]; then
 fi
 
 # ==============================================================================
-# Step 4. Superset 대기 + DB 초기화 (ephemeral PostgreSQL이므로 매번 필요)
+# Step 4: Superset - Wait & Initialize DB (Required for ephemeral DB)
 # ==============================================================================
 step "Step 4: Superset - Waiting & Initializing DB..."
 
@@ -101,10 +101,10 @@ else
   log "Running Superset DB initialization (db upgrade + admin user + init)..."
   kubectl exec -n superset "$SUPERSET_POD" -- bash -c "
     set -e
-    # DB 마이그레이션
+    # DB Migration
     superset db upgrade 2>&1 | grep -E '(ERROR|WARNING|Upgrading|Running|Done|OK)' || true
 
-    # Admin 계정 생성 (이미 있으면 무시)
+    # Create Admin account (Ignore if exists)
     superset fab create-admin \
       --username admin \
       --firstname Superset \
@@ -112,7 +112,7 @@ else
       --email admin@superset.com \
       --password admin 2>&1 | tail -3
 
-    # 권한/역할 초기화
+    # Initialize permissions and roles
     superset init 2>&1 | grep -E '(ERROR|Syncing|Creating|Cleaning)' || true
 
     echo 'SUPERSET_INIT_OK'
@@ -151,7 +151,7 @@ else
 
   TRINO_URI="trino://trino@trino.trino.svc.cluster.local:18080/iceberg"
 
-  # Python 스크립트를 base64로 인코딩 후 전달 (kubectl exec stdin/heredoc 이슈 우회)
+  # Pass base64-encoded Python script to bypass kubectl exec stdin/heredoc issues
   _PY=$(cat <<'PYEOF'
 import urllib.request, urllib.error, json, sys
 BASE="http://localhost:8088"; TRINO_NAME="Trino (Iceberg/Nessie)"; TRINO_URI="trino://trino@trino.trino.svc.cluster.local:18080/iceberg"

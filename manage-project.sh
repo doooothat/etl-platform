@@ -5,24 +5,25 @@ set -euo pipefail
 # ETL Platform Management Script
 # ==============================================================================
 # Usage:
-#   ./manage-project.sh start           - Ordered startup (respects dependency chain)
-#   ./manage-project.sh stop            - Scale down all workloads (replicas=0)
-#   ./manage-project.sh status          - Show current status of all workloads
-#   ./manage-project.sh deploy          - Uninstall & Re-install all Helm charts
-#   ./manage-project.sh deploy <name>   - Uninstall & Re-install specific component
-#                                         (e.g., keda, airflow, minio, nessie, spark-operator, superset, trino)
+#   ./manage-project.sh start [name]    - Ordered startup or start specific component
+#   ./manage-project.sh stop [name]     - Scale down all or specific component (wipes PVCs)
+#   ./manage-project.sh status [name]   - Show status of all or specific component
+#   ./manage-project.sh deploy [name]   - Uninstall & Re-install all or specific component
 #   ./manage-project.sh shutdown        - Stop the entire OrbStack engine
 #
+# Components: keda, airflow, minio, nessie, spark, superset, trino, monitoring
+#
 # Dependency order for 'start':
-#   [Stage 0] KEDA
-#   [Stage 1] MinIO
-#     └─ bucket 'iceberg-data' creation
-#   [Stage 2] Nessie (waits: MinIO + bucket)
+#   [Stage 0] KEDA (autoscaler)
+#   [Stage 1] MinIO (Object Storage)
+#             └─ bucket 'iceberg-data' creation
+#   [Stage 2] Nessie (Catalog waits: MinIO + bucket)
 #             Spark Operator (waits: MinIO)
-#   [Stage 3] Trino (waits: Nessie ready)
-#             Spark Thrift Server (waits: Spark Operator ready)
-#   [Stage 4] Airflow (waits: airflow-postgresql, airflow-redis)
-#             Superset (waits: superset-postgresql, superset-redis)
+#   [Stage 3] Trino (Query Engine waits: Nessie ready)
+#             Spark Thrift Server (waits: Spark Operator)
+#   [Stage 4] Airflow & Superset (Apps wait: DB/Redis Ready)
+#   [Stage 5] Data Integration (runs init_data.sh for sample data & DB links)
+#   [Stage 6] Monitoring (Prometheus & Grafana)
 # ==============================================================================
 
 # ── Colors ─────────────────────────────────────────────────────────────────────
@@ -99,9 +100,63 @@ function scale_ns() {
     fi
 }
 
+# get_ns_by_name <name>
+# Resolves a component name (release or namespace) to its namespace
+function get_ns_by_name() {
+    local target=$1
+    # Check direct namespace match
+    for ns in "${NAMESPACES[@]}"; do
+        if [[ "$ns" == "$target" ]]; then echo "$ns"; return 0; fi
+    done
+    # Check release name match
+    for entry in "${RELEASES[@]}"; do
+        IFS=":" read -r release namespace chart values <<< "$entry"
+        if [[ "$release" == "$target" ]]; then echo "$namespace"; return 0; fi
+    done
+    return 1
+}
+
 # ── Ordered Start ──────────────────────────────────────────────────────────────
 function start_ordered() {
-    echo -e "${C_BOLD}🚀 Starting ETL Platform (dependency-ordered)...${C_RESET}"
+    local target_comp=${1:-""}
+    
+    if [[ -n "$target_comp" ]]; then
+        local ns
+        ns=$(get_ns_by_name "$target_comp") || { log_err "Unknown component: $target_comp"; return 1; }
+        echo -e "${C_BOLD}🚀 Starting specific component: $target_comp ($ns)...${C_RESET}"
+        
+        case "$ns" in
+            airflow)
+                log_stage "Starting Airflow Stack"
+                scale_ns airflow 1 statefulsets
+                wait_statefulset airflow airflow-postgresql 60
+                scale_ns airflow 1 deployments
+                ;;
+            superset)
+                log_stage "Starting Superset Stack"
+                scale_ns superset 1 statefulsets
+                wait_statefulset superset superset-postgresql 60
+                scale_ns superset 1 deployments
+                ;;
+            monitoring)
+                log_stage "Starting Monitoring Stack"
+                kubectl patch prometheus prometheus-kube-prometheus-prometheus -n monitoring --type='merge' -p '{"spec": {"replicas": 1}}' 2>/dev/null || true
+                scale_ns monitoring 1
+                ;;
+            spark)
+                log_stage "Starting Spark Infrastructure"
+                scale_ns spark 1
+                ;;
+            *)
+                log_stage "Starting $ns"
+                scale_ns "$ns" 1
+                ;;
+        esac
+        log_ok "$target_comp started."
+        return 0
+    fi
+
+    echo -e "${C_BOLD}🚀 Starting Full ETL Platform (dependency-ordered)...${C_RESET}"
     echo -e "   $(date '+%Y-%m-%d %H:%M:%S')"
 
     # ────────────────────────────────────────────────────────────────
@@ -109,7 +164,7 @@ function start_ordered() {
     # ────────────────────────────────────────────────────────────────
     log_stage "Stage 0: KEDA"
     scale_ns keda 1
-    # KEDA는 보통 이미 running 상태 — 빠른 체크만
+    # KEDA is usually already running — quick check only
     kubectl wait --for=condition=available --timeout=60s \
         deployment/keda-operator -n keda 2>/dev/null \
         && log_ok "KEDA ready." || log_info "KEDA skipped (may already be running)."
@@ -146,8 +201,8 @@ function start_ordered() {
 
     scale_ns nessie 1
     scale_ns spark 1
-    # spark-thrift-server는 Stage 3에서 기동해야 하므로 지금은 즉시 강제 종료(Scale 0)합니다.
-    # (Nessie가 완전히 생성되기 전에 Thrift Server가 붙는 것을 방지)
+    # Spark Thrift Server should be started in Stage 3, so scale down now 
+    # (Prevents Thrift Server from connecting before Nessie is fully ready)
     kubectl scale deployment spark-thrift-server --replicas=0 -n spark 2>/dev/null || true
 
     wait_deploy nessie nessie 180      # Nessie health-checks MinIO bucket
@@ -162,14 +217,14 @@ function start_ordered() {
     log_stage "Stage 3: Trino + Spark Thrift Server"
 
     scale_ns trino 1
-    # Trino ready 대기 (Nessie 연동 확인)
+    # Wait for Trino ready (check Nessie integration)
     wait_deploy trino trino 180
 
-    # Trino와 Nessie가 완벽히 기동된 이후에 Thrift Server 기동
+    # Start Thrift Server after Trino and Nessie are fully ready
     log_wait "Starting Spark Thrift Server..."
     kubectl scale deployment spark-thrift-server --replicas=1 -n spark 2>/dev/null || true
 
-    # Thrift Server는 best-effort로 대기
+    # Thrift Server waits with best-effort
     kubectl rollout status deployment/spark-thrift-server -n spark \
         --timeout=120s 2>/dev/null \
         && log_ok "Spark Thrift Server is ready." \
@@ -182,7 +237,7 @@ function start_ordered() {
     kubectl delete sparkapplication iceberg-nessie-restore -n spark --ignore-not-found --wait=false
     kubectl apply -f ./spark/examples/spark-iceberg-nessie.yaml >/dev/null
     
-    # 데이터 적재가 완료될 때까지 잠시 대기 (비동기로 진행되지만 최소한의 확인)
+    # Wait for data load (async process, but do a minimum check)
     log_info "Sample data generation started in background (sparkapplication/iceberg-nessie-restore)."
 
     # ────────────────────────────────────────────────────────────────
@@ -191,17 +246,17 @@ function start_ordered() {
     # ────────────────────────────────────────────────────────────────
     log_stage "Stage 4a: Airflow (PostgreSQL → Redis → Migrations → Apps)"
 
-    # DB 및 Redis 먼저 기동
+    # Start DB and Redis first
     scale_ns airflow 1 statefulsets
     wait_statefulset airflow airflow-postgresql 120
     wait_statefulset airflow airflow-redis 120
 
-    # 데이터베이스가 휘발성(ephemeral)인 경우 재기동 시 마이그레이션이 다시 필요할 수 있음
+    # If DB is ephemeral, migration may be needed upon restart
     log_wait "Preparing Airflow database (migrations & admin user)..."
-    # 기존에 남아있는 Job이 있다면 삭제 (그래야 재생성되어 실행됨)
+    # Delete existing Jobs to allow recreation
     kubectl delete job -n airflow airflow-run-airflow-migrations airflow-create-user 2>/dev/null || true
     
-    # Helm upgrade를 통해 Job 재실행 (Wait-for-migrations Init container 대응)
+    # Run migrations via Helm upgrade (handles Wait-for-migrations Init container)
     helm upgrade --install airflow ./airflow -n airflow -f ./airflow/custom-values.yaml --reuse-values >/dev/null
 
     log_wait "Waiting for Airflow migrations to complete..."
@@ -210,13 +265,9 @@ function start_ordered() {
         && log_ok "Airflow migrations completed." \
         || log_info "Migration job timed out — checking logs might be necessary."
 
-    # 그 다음 Deployment들
+    # Start Deployments next
     scale_ns airflow 1 deployments
-    # api-server 확인
-    kubectl wait --for=condition=available --timeout=120s \
-        deployment/airflow-api-server -n airflow 2>/dev/null \
-        && log_ok "Airflow API Server is ready." \
-        || log_info "Airflow API Server still starting..."
+    # Check api-server
 
     # ────────────────────────────────────────────────────────────────
     # Stage 4b: Superset
@@ -228,7 +279,7 @@ function start_ordered() {
     wait_statefulset superset superset-postgresql 120
     wait_statefulset superset superset-redis-master 120
 
-    # 데이터베이스 휘발성 대비 Superset 초기화 (마이그레이션 + 관리자 권한)
+    # Initialize Superset for ephemeral DB (migrations + admin)
     log_wait "Preparing Superset database (migrations & admin user)..."
     kubectl delete job superset-init-db -n superset 2>/dev/null || true
     helm upgrade --install superset ./superset/superset -n superset -f ./superset/custom-values.yaml --reuse-values >/dev/null
@@ -257,6 +308,10 @@ function start_ordered() {
     # Stage 6: Monitoring (Prometheus & Grafana)
     # ────────────────────────────────────────────────────────────────
     log_stage "Stage 6: Monitoring (Prometheus & Grafana)"
+    
+    # Restore Prometheus replicas to 1 (trigger Operator to start)
+    kubectl patch prometheus prometheus-kube-prometheus-prometheus -n monitoring --type='merge' -p '{"spec": {"replicas": 1}}' 2>/dev/null || true
+    
     scale_ns monitoring 1 deployments
     kubectl wait --for=condition=available --timeout=120s \
         deployment/prometheus-grafana -n monitoring 2>/dev/null \
@@ -278,50 +333,63 @@ function start_ordered() {
     echo -e "  Grafana  → http://localhost:3000  (admin / admin)"
 }
 
-# ── Stop (all at once, order doesn't matter) ───────────────────────────────────
-function stop_all() {
-    echo -e "${C_YELLOW}Scaling down all project workloads and completely removing persistent storage...${C_RESET}"
-    for ns in "${NAMESPACES[@]}"; do
+# ── Stop (Scale down & Cleanup) ────────────────────────────────────────────────
+function stop_workloads() {
+    local target_comp=${1:-""}
+    local targets=()
+
+    if [[ -n "$target_comp" ]]; then
+        local ns
+        ns=$(get_ns_by_name "$target_comp") || { log_err "Unknown component: $target_comp"; return 1; }
+        targets=("$ns")
+        echo -e "${C_YELLOW}Stopping component: $target_comp ($ns)...${C_RESET}"
+    else
+        targets=("${NAMESPACES[@]}")
+        echo -e "${C_YELLOW}Scaling down all project workloads and completely removing persistent storage...${C_RESET}"
+    fi
+
+    for ns in "${targets[@]}"; do
         if kubectl get ns "$ns" >/dev/null 2>&1; then
             echo "  --- $ns ---"
             
-            # Monitoring 프로메테우스 부활(Reconcile) 원천 차단
+            # Prevent Monitoring Prometheus from reconciling back to life
             if [[ "$ns" == "monitoring" ]]; then
-                # scale_ns 전에 CRD 레벨에서 0으로 못 박아야 오퍼레이터가 다시 살리지 않음
                 kubectl patch prometheus prometheus-kube-prometheus-prometheus -n monitoring --type='merge' -p '{"spec": {"replicas": 0}}' 2>/dev/null || true
             fi
 
             scale_ns "$ns" 0
             
-            # Airflow Redis Pod가 finalizer로 인해 Terminating 상태에서 영구적으로 멈추는 고질적 문제 해결
+            # Clean up Airflow Redis Pod zombie processes
             if [[ "$ns" == "airflow" ]]; then
                 if kubectl get pod airflow-redis-0 -n airflow >/dev/null 2>&1; then
                     kubectl patch pod airflow-redis-0 -n airflow -p '{"metadata":{"finalizers":null}}' 2>/dev/null || true
-                    # K8s 강제 삭제 (Terminating 탈출용)
                     kubectl delete pod airflow-redis-0 -n airflow --force --grace-period=0 2>/dev/null || true
                 fi
-                # OrbStack(Docker) 내부 엔진 레벨에서 프로세스가 죽지 않는 좀비 현상(Orphan) 물리적 박멸
                 if command -v docker >/dev/null 2>&1; then
                     docker ps -q --filter "name=airflow-redis" | xargs -r docker rm -f 2>/dev/null || true
                 fi
             fi
 
-            # Monitoring의 경우 한 번 더 쐐기 (Operator 딜레이로 인한 부활시 직접 셧다운)
+            # Double-check Monitoring shutdown
             if [[ "$ns" == "monitoring" ]]; then
                 kubectl scale statefulset prometheus-prometheus-kube-prometheus-prometheus -n monitoring --replicas=0 2>/dev/null || true
             fi
             
             kubectl delete sparkapplications --all -n "$ns" 2>/dev/null || true
             
-            # PVC 강제 삭제 및 Finalizer 제거 (PVC Terminating 멈춤 방지)
+            # Force delete PVCs and remove Finalizers
             kubectl patch pvc --all -n "$ns" -p '{"metadata":{"finalizers":null}}' 2>/dev/null || true
             kubectl delete pvc --all -n "$ns" --force --grace-period=0 2>/dev/null || true
         fi
     done
     
-    # 볼륨 전체(PV) 정보까지 모두 무조건 삭제
-    kubectl delete pv --all 2>/dev/null || true
-    echo -e "${C_YELLOW}All workloads scaled to 0, and PVCs/PVs wiped clean.${C_RESET}"
+    if [[ -z "$target_comp" ]]; then
+        # Completely remove all Persistent Volumes only during full stop
+        kubectl delete pv --all 2>/dev/null || true
+        echo -e "${C_YELLOW}All workloads scaled to 0, and PVCs/PVs wiped clean.${C_RESET}"
+    else
+        echo -e "${C_YELLOW}Component $target_comp scaled to 0 and PVCs cleaned.${C_RESET}"
+    fi
 }
 
 # ── Deploy (Helm install/upgrade) ──────────────────────────────────────────────
@@ -358,7 +426,7 @@ function deploy_charts() {
 
         echo "  Installing $release using $chart..."
         if [[ "$chart" == *"spark-operator"* ]]; then
-            # Spark Operator 2.4.0 호환성 이슈로 인해 2.3.0으로 버전 고정
+            # Pinned to version 2.3.0 due to compatibility issues with 2.4.0
             helm upgrade --install "$release" "$chart" \
                 -n "$namespace" -f "$values" --set webhook.enable=true --version 2.3.0
         else
@@ -381,21 +449,27 @@ function deploy_charts() {
 # ── Main ───────────────────────────────────────────────────────────────────────
 case "$1" in
     start)
-        start_ordered
+        start_ordered "${2:-}"
         ;;
     stop)
-        stop_all
+        stop_workloads "${2:-}"
         ;;
     status)
-        for ns in "${NAMESPACES[@]}"; do
-            if kubectl get ns "$ns" >/dev/null 2>&1; then
-                echo -e "\n${C_BLUE}Namespace: $ns${C_RESET}"
-                kubectl get deployments,statefulsets,pods -n "$ns" 2>/dev/null
-            fi
-        done
+        if [[ -n "${2:-}" ]]; then
+            ns=$(get_ns_by_name "$2") || { log_err "Unknown component: $2"; exit 1; }
+            echo -e "\n${C_BLUE}Namespace: $ns${C_RESET}"
+            kubectl get deployments,statefulsets,pods -n "$ns" 2>/dev/null
+        else
+            for ns in "${NAMESPACES[@]}"; do
+                if kubectl get ns "$ns" >/dev/null 2>&1; then
+                    echo -e "\n${C_BLUE}Namespace: $ns${C_RESET}"
+                    kubectl get deployments,statefulsets,pods -n "$ns" 2>/dev/null
+                fi
+            done
+        fi
         ;;
     deploy)
-        deploy_charts "$2"  # Pass optional second argument (specific release name)
+        deploy_charts "${2:-}"  # Pass optional second argument (specific release name)
         ;;
     shutdown)
         echo "Are you sure you want to stop the entire OrbStack engine? (y/n)"
@@ -407,12 +481,14 @@ case "$1" in
         fi
         ;;
     *)
-        echo "Usage: $0 {start|stop|status|deploy [release]|shutdown}"
+        echo "Usage: $0 {start|stop|status|deploy [name]|shutdown}"
         echo ""
         echo "Examples:"
-        echo "  $0 deploy           # Deploy all components"
-        echo "  $0 deploy keda      # Deploy only KEDA"
-        echo "  $0 deploy airflow   # Deploy only Airflow"
+        echo "  $0 start            # Start all"
+        echo "  $0 stop             # Stop all"
+        echo "  $0 start superset   # Start only Superset"
+        echo "  $0 stop airflow     # Stop only Airflow"
+        echo "  $0 status trino     # Status of Trino"
         exit 1
         ;;
 esac

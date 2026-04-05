@@ -32,13 +32,13 @@ logs:
 workers:
   persistence:
     enabled: false
-  # KEDA 오토스케일링 활성화
+  # Enable KEDA autoscaling
   keda:
     enabled: true
-    pollingInterval: 5 # 5초마다 Redis 검사 (기본 30초는 너무 느림)
-    cooldownPeriod: 30 # 일 끝나고 30초 뒤에 Worker 축소
-    minReplicaCount: 1 # 최소 1명은 대기
-    maxReplicaCount: 5 # 최대 5명까지만 채용 (PC 안 터지게)
+    pollingInterval: 5 # Check Redis every 5s (default 30s is too slow)
+    cooldownPeriod: 30 # Scale down workers 30s after task completion
+    minReplicaCount: 1 # Always keep at least 1 worker
+    maxReplicaCount: 5 # Maximum workers to prevent system overload
 
 triggerer:
   persistence:
@@ -47,22 +47,22 @@ triggerer:
 dagProcessor:
   enabled: true
 
-# migrateDatabaseJob 및 createUserJob 강화
+# Enhanced migrateDatabaseJob and createUserJob
 migrateDatabaseJob:
-  useHelmHooks: false  # 디버깅을 위해 Hook 대신 일반 Job으로 생성
+  useHelmHooks: false  # Use regular Job instead of Helm Hooks for easier debugging
   ttlSecondsAfterFinished: 600
 
 createUserJob:
   useHelmHooks: false
-  # 기본 관리자 계정 설정 (필요시)
+  # Default Admin Account Settings (if needed)
   # username: admin
   # password: admin
   # role: Admin
   # email: admin@example.com
 
 # -------------------------------------------------------------
-# 로컬 개발 환경 설정: HostPath Mount
-# 로컬의 /Users/smylere/work/etl-platform/airflow/dags 폴더를 컨테이너의 /opt/airflow/dags로 직접 연결
+# Local development setting: HostPath Mount
+# Maps local dag folder to container's dags folder
 # -------------------------------------------------------------
 volumes:
   - name: dags-local
@@ -73,9 +73,9 @@ volumes:
 volumeMounts:
   - name: dags-local
     mountPath: /opt/airflow/dags
-    readOnly: false # 필요 시 Airflow가 파일을 쓸 수 있도록 (Logs 등은 별도지만, 여기선 일단 false)
+    readOnly: false # Allow Airflow to write files if needed (e.g. Logs)
 
-# 외부 노출 설정: Orbstack에서 자동으로 localhost:8080에 연결하도록 LoadBalancer 설정
+# External UI access: Orbstack mapping for localhost:8080 via LoadBalancer
 apiServer:
   service:
     type: LoadBalancer
@@ -83,4 +83,4 @@ apiServer:
 webserver:
   enabled: true
   service:
-    type: LoadBalancer # Airflow 3.0+ 에서 UI 서비스
+    type: LoadBalancer # UI Service for Airflow 3.0+

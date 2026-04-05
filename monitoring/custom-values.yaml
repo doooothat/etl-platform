@@ -8,8 +8,8 @@ alertmanager:
 ## Grafana: Enabled (Essential for visualization)
 grafana:
   enabled: true
-  adminPassword: "admin" # 기본 비밀번호 설정
-  # 서비스 포트를 80 대신 3000으로 변경 및 로드밸런서 타입으로 지정
+  adminPassword: "admin" # Set default admin password
+  # Change port from 80 to 3000 and use LoadBalancer type
   service:
     type: LoadBalancer
     port: 3000
@@ -68,28 +68,28 @@ prometheusOperator:
 prometheus:
   enabled: true
   prometheusSpec:
-    # 데이터 보존 기간을 짧게 설정하여 스토리지 및 메모리 확보
+    # Short retention to save storage and memory
     retention: 1d
     retentionSize: "2GB"
-    # 수집 주기를 늘려 CPU 스파이크를 줄임
+    # Increase interval to reduce CPU spikes
     scrapeInterval: "30s"
     evaluationInterval: "30s"
     
-    # 임시 스토리지 구성 (재시작 시 초기화, 로컬 환경)
+    # Ephemeral storage (reset on restart, local env)
     storageSpec:
       emptyDir:
         medium: "Memory"
         sizeLimit: 1Gi
 
-    # Prometheus 메모리/CPU 캡 설정
+    # Prometheus memory/CPU resource caps
     resources:
       requests:
         cpu: 200m
         memory: 512Mi
       limits:
         cpu: 500m
-        memory: 1024Mi # 1GB 제한으로 타 엔진 OOM 보호
+        memory: 1024Mi # Protect system with 1GB limit
 
-# 기본 제공되는 무거운 알람 룰 모두 끄기
+# Disable heavy default alerting rules
 defaultRules:
   create: false
