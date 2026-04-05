@@ -11,6 +11,13 @@ if [[ -f "local.env" ]]; then
     source "local.env"
 fi
 PROJECT_ROOT=${PROJECT_ROOT%/} # Trim trailing slash if any
+
+# Validate PROJECT_ROOT
+if [[ ! -d "$PROJECT_ROOT" ]]; then
+    echo -e "\n\033[1;31m❌ ERROR: PROJECT_ROOT ($PROJECT_ROOT) is not a valid directory!\033[0m"
+    echo "Please check your 'local.env' or ensure you are in the correct directory."
+    exit 1
+fi
 # ==============================================================================
 # Usage:
 #   ./manage-project.sh start [name]    - Ordered startup or start specific component
@@ -440,19 +447,24 @@ function deploy_charts() {
         kubectl create namespace "$namespace" 2>/dev/null || true
 
         echo "  Installing $release using $chart..."
-        if [[ "$chart" == *"spark-operator"* ]]; then
-            # Pinned to version 2.3.0 due to compatibility issues with 2.4.0
-            helm upgrade --install "$release" "$chart" \
-                -n "$namespace" -f "$values" --set webhook.enable=true --version 2.3.0
-        elif [[ "$release" == "airflow" ]]; then
-            # Inject dynamic local path for Airflow DAGs (from PROJECT_ROOT)
-            helm upgrade --install "$release" "$chart" \
-                -n "$namespace" -f "$values" \
-                --set "volumes[0].hostPath.path=$PROJECT_ROOT/airflow/dags"
-        else
-            helm upgrade --install "$release" "$chart" \
-                -n "$namespace" -f "$values"
-        fi
+        
+        # Create a temporary local values file for dynamic path injection
+        case "$release" in
+            airflow)
+                log_wait "Injecting local paths into $release..."
+                sed "s|/path/to/project/airflow/dags|$PROJECT_ROOT/airflow/dags|g" "$values" > "${values}.tmp"
+                helm upgrade --install "$release" "$chart" -n "$namespace" -f "${values}.tmp"
+                rm -f "${values}.tmp"
+                ;;
+            spark-operator)
+                # Pin to 2.3.0 due to compatibility issues with 2.4.0
+                helm upgrade --install "$release" "$chart" \
+                    -n "$namespace" -f "$values" --set webhook.enable=true --version 2.3.0
+                ;;
+            *)
+                helm upgrade --install "$release" "$chart" -n "$namespace" -f "$values"
+                ;;
+        esac
     done
 
     # Deploy Spark Thrift Server if spark-operator was deployed
