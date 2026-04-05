@@ -67,7 +67,7 @@ createUserJob:
 volumes:
   - name: dags-local
     hostPath:
-      path: /Users/smylere/work/etl-platform/airflow/dags
+      path: /path/to/project/airflow/dags # Automatically injected by manage-project.sh
       type: Directory
 
 volumeMounts:

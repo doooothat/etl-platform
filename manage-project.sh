@@ -4,6 +4,14 @@ set -euo pipefail
 # ==============================================================================
 # ETL Platform Management Script
 # ==============================================================================
+# Load local environment configurations if exists
+PROJECT_ROOT=$(pwd)
+if [[ -f "local.env" ]]; then
+    # shellcheck source=/dev/null
+    source "local.env"
+fi
+PROJECT_ROOT=${PROJECT_ROOT%/} # Trim trailing slash if any
+# ==============================================================================
 # Usage:
 #   ./manage-project.sh start [name]    - Ordered startup or start specific component
 #   ./manage-project.sh stop [name]     - Scale down all or specific component (wipes PVCs)
@@ -429,6 +437,11 @@ function deploy_charts() {
             # Pinned to version 2.3.0 due to compatibility issues with 2.4.0
             helm upgrade --install "$release" "$chart" \
                 -n "$namespace" -f "$values" --set webhook.enable=true --version 2.3.0
+        elif [[ "$release" == "airflow" ]]; then
+            # Inject dynamic local path for Airflow DAGs (from PROJECT_ROOT)
+            helm upgrade --install "$release" "$chart" \
+                -n "$namespace" -f "$values" \
+                --set "volumes[0].hostPath.path=$PROJECT_ROOT/airflow/dags"
         else
             helm upgrade --install "$release" "$chart" \
                 -n "$namespace" -f "$values"

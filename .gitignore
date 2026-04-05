@@ -24,7 +24,10 @@ ENV/
 brain/
 logs/
 
-# --- Project Specific (Contains Local Paths/PI) ---
+# --- Project Specific (Contains Local Paths/PII) ---
+.env
+local.env
+*.local
 airflow/incident_logs/
 *.log
 /handoff.md  # Specific session history with local paths
