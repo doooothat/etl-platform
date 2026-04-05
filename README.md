@@ -69,4 +69,21 @@ Scale down all workloads and clean up ephemeral storage (PVCs).
 - **Ephemeral Storage**: All DB/Storage are memory-backed or ephemeral for a clean local development experience.
 
 ---
+
+## ✅ Verified Environment
+
+The following environment has been verified to run the full platform stable:
+
+- **OS**: macOS (Apple Silicon / Intel)
+- **Container / K8s**: [OrbStack](https://orbstack.dev/) (v1.5.0+)
+    - *Note: Integrated K3s engine is recommended for lightweight local operation.*
+- **Cluster Specs**:
+    - **RAM**: Minimum 4GB+ allocated to OrbStack (8GB+ recommended)
+    - **CPU**: 4 Cores+ allocated
+- **Command Line Tools**:
+    - **Helm**: v3.12+
+    - **Kubectl**: v1.28+
+    - **Shell**: Bash / Zsh (MacOS Default)
+
+---
 > **Tip**: If `local.env` is not present, the script defaults to the current working directory (`$(pwd)`). However, explicitly setting `PROJECT_ROOT` is recommended for stability.

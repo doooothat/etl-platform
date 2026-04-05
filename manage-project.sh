@@ -416,6 +416,13 @@ function deploy_charts() {
         echo -e "${C_YELLOW}Deploying only: $target_release${C_RESET}"
     fi
 
+    # Ensure mandatory Helm repositories are present
+    echo -e "\n${C_BLUE}>>> Updating Helm repositories... <<<${C_RESET}"
+    helm repo add kedacore https://kedacore.github.io/charts --quiet 2>/dev/null || true
+    helm repo add spark-operator https://googlecloudplatform.github.io/spark-on-k8s-operator --quiet 2>/dev/null || true
+    helm repo add prometheus-community https://prometheus-community.github.io/helm-charts --quiet 2>/dev/null || true
+    helm repo update >/dev/null
+
     for entry in "${RELEASES[@]}"; do
         IFS=":" read -r release namespace chart values <<< "$entry"
 
