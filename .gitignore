@@ -30,8 +30,7 @@ local.env
 *.local
 airflow/incident_logs/
 *.log
-/handoff.md  # Specific session history with local paths
-/overview.md # Contains local path examples (reconfirm if tracking is needed)
+
 
 # --- Kubernetes & Helm ---
 *.tgz
