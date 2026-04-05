@@ -3,41 +3,31 @@
 This document contains the project status and a guide for the next operator at the time of session completion.
 
 ## 🕒 Last Update
-- **Timestamp**: 2026-04-03T23:59:00+09:00
+- **Timestamp**: 2026-04-05T21:48:00+09:00
 - **Agent**: Antigravity (Google Deepmind)
-- **Status**: Full system shutdown (stop) test completed and force-stop logic enhanced. (Current state: All pods at Scale 0)
+- **Status**: Platform translated to English, project configurations isolated to `local.env` for privacy, `manage-project.sh` enhanced for granular control, and zero-config deployment fully verified. (Current state: All systems running, Airflow verified accessible).
 
 ## 🛠️ Work Completed Today
 
-### 1. Superset - Trino(Iceberg) Integration Resolved
-- **Issue**: Superset could not query Iceberg catalog tables through Trino.
-- **Resolution**:
-  - Fixed `manage-project.sh` to point to the correct local chart path (`./trino`) instead of the official Helm repo.
-  - Updated `iceberg.rest-catalog.uri` in `trino/templates/configmap.yaml` from `/api/v1/iceberg/main` to `/iceberg/main` to match Nessie 0.107.0 REST Catalog endpoint changes.
-  - Successfully verified queries for `ecommerce.customers` table in Superset SQL Lab (15 rows rendered).
+### 1. Codebase Standardization (English Translation)
+- Translated all Korean comments, documentation, and logging messages across `manage-project.sh`, `init_data.sh`, `Spark` scripts, and `values.yaml` configuration files to English to ensure global collaboration readability.
 
-### 2. manage-project.sh Script Optimization & Enhancement
-- **Full PVC Destruction Policy**: Modified `stop` command to unconditionally delete all existing PVCs and PVs to ensure environmental isolation and ephemerality.
-- **scale_ns Bug Fix**: Resolved an issue where StatefulSets failed to scale down to 0 (removed `--timeout=5s` API wait condition).
-- **Zombie Process Prevention (Airflow Redis Issue)**:
-  - Addressed a scenario where `kubectl delete pod --force` removed pods from K8s but left "orphan" processes in the container runtime (OrbStack/Docker).
-  - Integrated a "laser script" into the `stop` logic that uses `docker ps` to identify and physically exterminate containers at the Docker level (`docker rm -f`).
-- **Prometheus Operator Reconciliation Bug Fix**:
-  - Fixed a bug where Prometheus Operator resurrected the Prometheus server pod right before shutdown.
-  - Improved the script to `patch` the K8s CRD (`prometheus.monitoring`) to `spec.replicas: 0` at the very beginning of the shutdown process to prevent resurrection.
-- **Spark Operator Version Pinning**: Hardcoded `--version 2.3.0` for Spark Operator deployment to avoid bugs in version 2.4.0 that caused `CrashLoopBackOff`.
+### 2. Enhanced Component Management & Zero-Config Deployment
+- **Granular Control**: Improved `manage-project.sh` to allow starting/stopping of specific components (e.g., `./manage-project.sh start airflow`).
+- **Dynamic Path Injection**: Resolved Helm chart array index limitation problems that previously broke Airflow `hostPath` mounts. Real path is now injected dynamically via a locally created and properly formatted `values.yaml.tmp`.
+- **Zero-Config Helm Repositories**: Updated `manage-project.sh` to automatically add and update required Helm repositories (e.g., KEDA, Spark Operator) during `deploy` process.
+- **Bug Fix**: Fixed a `set -u` unbound variable error in bash.
 
-### 3. Monitoring Stack (Prometheus + Grafana) Implementation
-- **Lightweight Local Deployment**: Redesigned `kube-prometheus-stack` for resource optimization (OrbStack RAM usage ~4GB).
-  - Created `custom-values.yaml` in the `monitoring` directory.
-  - Disabled AlertManager and NodeExporter; set Prometheus storage to 1-Day (In-Memory).
-- **Port Mapping & Local Access**: Exposed Grafana via `LoadBalancer` on port `3000` instead of 80 ([http://localhost:3000](http://localhost:3000) | admin : admin).
-- **Script Integration**: Integrated Grafana startup into Stage 6 of the `manage-project.sh` Deploy & Start logic.
+### 3. Environment Separation and Privacy (PII Masking)
+- **PII Scrubbing**: Investigated and removed all instances of the user's local specific directory and username (`/Users/smylere/...`) from documentation, markdown files, and Helm values.
+- **Local Environment Variables**: Implemented a `local.env` approach where users establish their own local path variables, ensuring local properties do not bleed into the codebase. Addressed through a new `env.example` template.
+- **`.gitignore` Hardening**: Ensured that `local.env`, `.env`, AI agent caches (`.agent/`, `.claude/`, `.gemini/`), and specific incident logs are correctly excluded from Git. Successfully cleaned out previously tracked AI workflows and session documents from Git index.
+- Note: User requested that `handoff.md` and `overview.md` remain tracked in Git to maintain continuity.
 
 ## 📊 Current System Status
 
 ### Running Services (All Stopped - Scale: 0)
-The system is currently in a **fully stopped state** via `./manage-project.sh stop`. All namespace workloads are at Scale 0, Persistent Volumes (PVC/PV) are cleared, and zombie containers have been exterminated. You can safely proceed with any tasks or run `./manage-project.sh start`.
+The system is currently fully verified and running. You can safely proceed with ETL pipeline development or query the available engines.
 
 ### Infrastructure Characteristics
 - **Data Ephemerality**: All DBs/Storage use `persistence.enabled: false` (ephemeral). PVCs are wiped by the management script.
@@ -77,4 +67,4 @@ The system is currently in a **fully stopped state** via `./manage-project.sh st
 3. **Unity Catalog OSS Evaluation**: Consider a POC for `Delta Lake 4.x + Unity Catalog OSS` as a modern alternative stack.
 
 ---
-*This document was updated by Antigravity at the end of the session on 2026-04-03.*
+*This document was updated by Antigravity at the end of the session on 2026-04-05.*
