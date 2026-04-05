@@ -37,3 +37,4 @@ airflow/incident_logs/
 *.tgz
 .helm/
 chart-*.tgz
+CLAUDE.md
