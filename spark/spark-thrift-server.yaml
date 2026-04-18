@@ -25,7 +25,7 @@ spec:
               mountPath: /tmp
       containers:
         - name: thrift-server
-          image: apache/spark:3.5.4
+          image: custom-spark:4.0.2-nessie
           command:
             - /opt/spark/bin/spark-submit
           args:
@@ -36,7 +36,7 @@ spec:
             - --master
             - local[*]
             - --packages
-            - org.apache.iceberg:iceberg-spark-runtime-3.5_2.12:1.7.1,org.projectnessie.nessie-integrations:nessie-spark-extensions-3.5_2.12:0.101.3,org.apache.iceberg:iceberg-aws-bundle:1.7.1
+            - org.apache.iceberg:iceberg-spark-runtime-4.0_2.13:1.10.1,org.apache.iceberg:iceberg-aws-bundle:1.10.1
             - --conf
             - spark.jars.ivy=/tmp/ivy
             - --conf

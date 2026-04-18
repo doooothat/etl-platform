@@ -2,7 +2,7 @@
 versionStoreType: IN_MEMORY
 
 image:
-  tag: "0.107.0"
+  tag: "0.107.4"
   pullPolicy: IfNotPresent
 
 # Resource limits

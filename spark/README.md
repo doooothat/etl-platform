@@ -1,4 +1,13 @@
-# spark-operator
+# Spark Operator & Custom Apache Spark Engine
+
+> **⚠️ CUSTOM SPARK ENGINE NOTICE**
+> The `Dockerfile` inside this directory is used to build `custom-spark:4.0.2-nessie`. 
+> We inject the manually-compiled Project Nessie missing plugin into the official Apache Spark 4.0.2 image because Nessie `0.107.4` failed to publish `nessie-spark-extensions-4.0_2.13` to Maven Central.
+> Run `docker build -t custom-spark:4.0.2-nessie .` in this directory to reconstruct the image.
+
+---
+
+# kubeflow/spark-operator
 
 ![Version: 2.4.0](https://img.shields.io/badge/Version-2.4.0-informational?style=flat-square) ![AppVersion: 2.4.0](https://img.shields.io/badge/AppVersion-2.4.0-informational?style=flat-square)
 

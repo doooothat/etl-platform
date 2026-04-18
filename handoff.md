@@ -24,6 +24,15 @@ This document contains the project status and a guide for the next operator at t
 - **`.gitignore` Hardening**: Ensured that `local.env`, `.env`, AI agent caches (`.agent/`, `.claude/`, `.gemini/`), and specific incident logs are correctly excluded from Git. Successfully cleaned out previously tracked AI workflows and session documents from Git index.
 - Note: User requested that `handoff.md` and `overview.md` remain tracked in Git to maintain continuity.
 
+### 4. Spark 4.0.2 Upgrade & Source Build (Custom Nessie Integration)
+- **Dependency Bottleneck Resolution**: Discovered that official `nessie-spark-extensions-4.0_2.13` artifacts were missing from Maven Central despite Nessie 0.107.4 claiming Spark 4 compatibility.
+- **Multi-Stage Custom Dockerfile**: Created `spark/Dockerfile` to pull Nessie source code, compile the exact Spark 4.0 JAR locally via Gradle, and inject it into a new base image (`custom-spark:4.0.2-nessie`).
+- **IaC Configuration Upgrade**: 
+  - Upgraded `spark/init-data-job.yaml` and `spark/spark-thrift-server.yaml` to use Scala 2.13, Spark 4.0.2, and Iceberg 1.10.1.
+  - Upgraded Nessie server version to `0.107.4` in `nessie/custom-values.yaml`.
+  - Upgraded Trino version to `480` in `trino/Chart.yaml` to ensure V2/V3 compatibility.
+- **End-to-End Verification**: Confirmed flawless execution of the Iceberg sample restoration job using the new custom Spark image, and successfully ran SQL queries against the local `10000` Thrift Server port.
+
 ## 📊 Current System Status
 
 ### Running Services (All Stopped - Scale: 0)

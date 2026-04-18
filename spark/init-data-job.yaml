@@ -7,10 +7,10 @@ spec:
   type: Python
   pythonVersion: "3"
   mode: cluster
-  image: "apache/spark:3.5.4"
+  image: "custom-spark:4.0.2-nessie"
   imagePullPolicy: IfNotPresent
   mainApplicationFile: "local:///tmp/script/restore_data.py"
-  sparkVersion: "3.5.4"
+  sparkVersion: "4.0.2"
   restartPolicy:
     type: Never
   volumes:
@@ -23,7 +23,7 @@ spec:
     cores: 1
     memory: "1g"
     labels:
-      version: 3.5.4
+      version: 4.0.2
     serviceAccount: spark-operator-sa
     env:
       - name: AWS_REGION
@@ -59,7 +59,7 @@ spec:
       - name: tmp-vol
         mountPath: /tmp
   sparkConf:
-    "spark.jars.packages": "org.apache.iceberg:iceberg-spark-runtime-3.5_2.12:1.7.1,org.projectnessie.nessie-integrations:nessie-spark-extensions-3.5_2.12:0.101.3,org.apache.iceberg:iceberg-aws-bundle:1.7.1"
+    "spark.jars.packages": "org.apache.iceberg:iceberg-spark-runtime-4.0_2.13:1.10.1,org.apache.iceberg:iceberg-aws-bundle:1.10.1"
     "spark.jars.ivy": "/tmp"
     "spark.sql.extensions": "org.apache.iceberg.spark.extensions.IcebergSparkSessionExtensions,org.projectnessie.spark.extensions.NessieSparkSessionExtensions"
     "spark.sql.catalog.nessie": "org.apache.iceberg.spark.SparkCatalog"
