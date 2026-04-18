@@ -47,6 +47,12 @@ graph TD
 | **MinIO** | Object Storage | `minio.minio.svc` | 9000/1 | [http://localhost:9001](http://localhost:9001) |
 | **Superset** | BI & Visualization | `superset.superset.svc` | 8088 | [http://localhost:8088](http://localhost:8088) |
 
+### ⚠️ Spark 4.0 Engine (Custom Image)
+All Spark workloads in this platform (Iceberg restoration jobs and Thrift Server) are running on **`custom-spark:4.0.2-nessie`**. 
+- **Why Custom?**: Due to a missing artifact (`nessie-spark-extensions-4.0_2.13`) in Maven Central for Nessie `0.107.4`, the official Apache Spark image cannot download the plugin automatically at runtime.
+- **How it works**: We use a multi-stage `spark/Dockerfile` to pull the Nessie source code, compile the exact Scala 2.13 plugin using Gradle, and inject it cleanly into the official `apache/spark:4.0.2` image.
+- **Maintenance**: Once Project Nessie officially publishes the artifact to Maven, you can revert the images to `apache/spark:4.0.2` and simply declare the extension in `spark.jars.packages`.
+
 ---
 
 ## ⚡ 3. Infra & Data Management (`manage-project.sh`)

@@ -3,4 +3,4 @@ name: trino
 description: A Helm chart for Trino with Iceberg and Nessie support
 type: application
 version: 0.1.0
-appVersion: "435"
+appVersion: "480"
