@@ -49,11 +49,11 @@ dagProcessor:
 
 # Enhanced migrateDatabaseJob and createUserJob
 migrateDatabaseJob:
-  useHelmHooks: false  # Use regular Job instead of Helm Hooks for easier debugging
+  useHelmHooks: true  # Enforces sequential execution via Helm hooks
   ttlSecondsAfterFinished: 600
 
 createUserJob:
-  useHelmHooks: false
+  useHelmHooks: true
   # Default Admin Account Settings (if needed)
   # username: admin
   # password: admin

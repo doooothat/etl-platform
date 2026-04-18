@@ -45,7 +45,7 @@ log "Deleting previous job if exists..."
 kubectl delete sparkapplication iceberg-nessie-restore -n spark --ignore-not-found --wait=false
 
 log "Submitting Spark job..."
-kubectl apply -f "$SCRIPT_DIR/spark/examples/spark-iceberg-nessie.yaml"
+kubectl apply -f "$SCRIPT_DIR/spark/init-data-job.yaml"
 
 log "Watching Spark Job progress (max 5 min)..."
 SPARK_SUCCESS=false

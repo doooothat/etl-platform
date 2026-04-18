@@ -250,7 +250,7 @@ function start_ordered() {
     # ────────────────────────────────────────────────────────────────
     log_wait "Creating Iceberg sample data via Spark Job..."
     kubectl delete sparkapplication iceberg-nessie-restore -n spark --ignore-not-found --wait=false
-    kubectl apply -f ./spark/examples/spark-iceberg-nessie.yaml >/dev/null
+    kubectl apply -f ./spark/init-data-job.yaml >/dev/null
     
     # Wait for data load (async process, but do a minimum check)
     log_info "Sample data generation started in background (sparkapplication/iceberg-nessie-restore)."
@@ -272,8 +272,9 @@ function start_ordered() {
     kubectl delete job -n airflow airflow-run-airflow-migrations airflow-create-user 2>/dev/null || true
     
     # Run migrations via Helm upgrade (handles Wait-for-migrations Init container)
-    helm upgrade --install airflow ./airflow -n airflow -f ./airflow/custom-values.yaml --reuse-values >/dev/null
-
+    sed "s|/path/to/project/airflow/dags|$PROJECT_ROOT/airflow/dags|g" ./airflow/custom-values.yaml > ./airflow/custom-values.yaml.tmp
+    helm upgrade --install airflow ./airflow -n airflow -f ./airflow/custom-values.yaml.tmp --reuse-values >/dev/null
+    rm -f ./airflow/custom-values.yaml.tmp
     log_wait "Waiting for Airflow migrations to complete..."
     kubectl wait --for=condition=complete --timeout=180s \
         job/airflow-run-airflow-migrations -n airflow 2>/dev/null \
