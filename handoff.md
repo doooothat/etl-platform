@@ -3,77 +3,71 @@
 This document contains the project status and a guide for the next operator at the time of session completion.
 
 ## 🕒 Last Update
-- **Timestamp**: 2026-04-05T21:48:00+09:00
+- **Timestamp**: 2026-04-20T22:12:00+09:00
 - **Agent**: Antigravity (Google Deepmind)
-- **Status**: Platform translated to English, project configurations isolated to `local.env` for privacy, `manage-project.sh` enhanced for granular control, and zero-config deployment fully verified. (Current state: All systems running, Airflow verified accessible).
+- **Status**: Kafka Message Bus & Vector Log Collection Pipeline fully established and verified. (Current state: Kafka, Vector, and monitoring systems are running and active).
 
 ## 🛠️ Work Completed Today
 
-### 1. Codebase Standardization (English Translation)
-- Translated all Korean comments, documentation, and logging messages across `manage-project.sh`, `init_data.sh`, `Spark` scripts, and `values.yaml` configuration files to English to ensure global collaboration readability.
+### 1. Kafka Infrastructure (KRaft Mode)
+- **Apache Official Image**: Deployed `apache/kafka:3.9.0` using pure Kubernetes manifests to ensure ARM64 (M4 Mac) compatibility.
+- **KRaft Protocol**: Successfully configured a single-node KRaft cluster bypassing previous Bitnami Helm chart environment variable nesting and parsing issues.
+- **No PVC Policy**: Adhered to the project's data ephemerality principle by using `emptyDir` storage. Kafka logs will be cleared upon pod restart/stop to prevent local storage bloat.
+- **FIFO Retention (Storage Optimizer)**:
+    - `log.retention.bytes`: 500MB
+    - `log.retention.hours`: 2h
+    - `log.segment.bytes`: 100MB (for rapid segment cleanup)
+- **Kafka UI**: Deployed on Port `9080` ([http://localhost:9080](http://localhost:9080)) for real-time topic and message monitoring.
 
-### 2. Enhanced Component Management & Zero-Config Deployment
-- **Granular Control**: Improved `manage-project.sh` to allow starting/stopping of specific components (e.g., `./manage-project.sh start airflow`).
-- **Dynamic Path Injection**: Resolved Helm chart array index limitation problems that previously broke Airflow `hostPath` mounts. Real path is now injected dynamically via a locally created and properly formatted `values.yaml.tmp`.
-- **Zero-Config Helm Repositories**: Updated `manage-project.sh` to automatically add and update required Helm repositories (e.g., KEDA, Spark Operator) during `deploy` process.
-- **Bug Fix**: Fixed a `set -u` unbound variable error in bash.
+### 2. Log Collection Pipeline (Vector)
+- **Real-time shipping**: Deployed **Vector** as a DaemonSet to collect all Kubernetes pod logs and ship them to Kafka.
+- **Topic**: Sink configured to `k8s_logs` topic in JSON format.
+- **Verification**: Confirmed logs (e.g., Kafka consumer metadata logs) are successfully landing in the Kafka topic via both Kafka UI and CLI.
 
-### 3. Environment Separation and Privacy (PII Masking)
-- **PII Scrubbing**: Investigated and removed all instances of the user's local specific directory and username (`/Users/smylere/...`) from documentation, markdown files, and Helm values.
-- **Local Environment Variables**: Implemented a `local.env` approach where users establish their own local path variables, ensuring local properties do not bleed into the codebase. Addressed through a new `env.example` template.
-- **`.gitignore` Hardening**: Ensured that `local.env`, `.env`, AI agent caches (`.agent/`, `.claude/`, `.gemini/`), and specific incident logs are correctly excluded from Git. Successfully cleaned out previously tracked AI workflows and session documents from Git index.
-- Note: User requested that `handoff.md` and `overview.md` remain tracked in Git to maintain continuity.
+### 3. technical Study & Documentation
+- **Deep-dive Analysis**: Created `study/study-2026-04-20-kafka-infrastructure-troubleshooting.md`.
+- **Content**: Documents the complex resolution of "Address not available" binding errors and how to handle the `apache/kafka` image's internal wrapper scripts (env var auto-derivation logic).
 
-### 4. Spark 4.0.2 Upgrade & Source Build (Custom Nessie Integration)
-- **Dependency Bottleneck Resolution**: Discovered that official `nessie-spark-extensions-4.0_2.13` artifacts were missing from Maven Central despite Nessie 0.107.4 claiming Spark 4 compatibility.
-- **Multi-Stage Custom Dockerfile**: Created `spark/Dockerfile` to pull Nessie source code, compile the exact Spark 4.0 JAR locally via Gradle, and inject it into a new base image (`custom-spark:4.0.2-nessie`).
-- **IaC Configuration Upgrade**: 
-  - Upgraded `spark/init-data-job.yaml` and `spark/spark-thrift-server.yaml` to use Scala 2.13, Spark 4.0.2, and Iceberg 1.10.1.
-  - Upgraded Nessie server version to `0.107.4` in `nessie/custom-values.yaml`.
-  - Upgraded Trino version to `480` in `trino/Chart.yaml` to ensure V2/V3 compatibility.
-- **End-to-End Verification**: Confirmed flawless execution of the Iceberg sample restoration job using the new custom Spark image, and successfully ran SQL queries against the local `10000` Thrift Server port.
+### 4. Lifecycle Management & Cleanup
+- **Script Integration**: Updated `manage-project.sh` with **Stage 1.5 (Kafka)** and **Stage 1.6 (Vector)** in the project lifecycle.
+- **Deployment Logic**: Enhanced `deploy` function to handle `kubectl apply` for Kafka/Vector instead of traditional Helm.
+- **System Cleanup**: Ran `docker system prune` to clear all legacy Bitnami/test images, reclaiming several GBs of disk space on the host.
 
 ## 📊 Current System Status
 
-### Running Services (All Stopped - Scale: 0)
-The system is currently fully verified and running. You can safely proceed with ETL pipeline development or query the available engines.
+### Running Services (Active)
+- **Kafka**: `1/1 Running` (Port 9092)
+- **Kafka UI**: `1/1 Running` (Port 9080)
+- **Vector**: `1/1 Running` (DaemonSet)
+- **Monitoring**: Prometheus/Grafana active.
+- **ETL Base**: MinIO, Nessie, Spark, Airflow scaled to 1.
 
-### Infrastructure Characteristics
-- **Data Ephemerality**: All DBs/Storage use `persistence.enabled: false` (ephemeral). PVCs are wiped by the management script.
-- **Nessie Catalog**: `IN_MEMORY` mode (requires re-init on pod restart).
-- **Airflow DAGs**: `hostPath` mount (survives teardown).
-- **MinIO**: Standalone mode, `iceberg-data` bucket automatically created.
+### Log Flow Status
+```
+[Pods Logs] --(Vector)--> [Kafka: k8s_logs] --(Waiting)--> [Spark Streaming] --> [Iceberg]
+      ✅                      ✅                     🚧 (To be built)
+```
 
 ## 🔧 Operation Commands
 
 ```bash
-# Check Status
-./manage-project.sh status
-
-# Full Start / Stop
-./manage-project.sh stop   # Scale 0, Clear PVC/PV, Finalizer cleanup applied
-./manage-project.sh start  # Dependency-ordered startup & migration
+# Verify Log Flow (Topic exists and has messages)
+kubectl exec -n kafka kafka-0 -- /opt/kafka/bin/kafka-topics.sh --bootstrap-server localhost:9092 --list
+kubectl exec -n kafka kafka-0 -- /opt/kafka/bin/kafka-console-consumer.sh --bootstrap-server localhost:9092 --topic k8s_logs --from-beginning --max-messages 5
 
 # Re-deploy Individual Component
-./manage-project.sh deploy nessie
-./manage-project.sh deploy spark-operator
+./manage-project.sh deploy kafka
+./manage-project.sh deploy vector
 
-# Full Re-installation
-./manage-project.sh deploy          # Shows confirmation prompt
-./init_data.sh                      # Data initialization (included in 'start')
-
-# Shut down OrbStack
-./manage-project.sh shutdown
+# Full Start / Stop (Now includes Kafka/Vector)
+./manage-project.sh start
+./manage-project.sh stop
 ```
 
-## ⚠️ Known Issues (Fixed)
-1. **Spark Operator CrashLoopBackOff**: Resolved by pinning the Helm release version to `v2.3.0`.
-2. **Airflow Namespace Stuck in Terminating**: Resolved by applying a `finalizers: null` patch to Airflow-redis pods and PVCs during `manage-project.sh stop`.
-
 ## 📝 Next Session Suggestions
-1. **Begin Pipeline Development**: All ETL baseline and monitoring components are ready! You can start developing ETL pipelines via Airflow DAGs.
-2. **Superset Dashboard Planning**: Design dashboards in Superset using Iceberg table statistics processed by Trino.
-3. **Unity Catalog OSS Evaluation**: Consider a POC for `Delta Lake 4.x + Unity Catalog OSS` as a modern alternative stack.
+1. **Develop Spark Structured Streaming**: Create a Spark job/Airflow DAG that reads from Kafka's `k8s_logs` topic and writes to the Iceberg table in MinIO.
+2. **Schema Definition**: Define the target schema for logs in Iceberg (e.g., timestamp, namespace, pod_name, log_level, message).
+3. **Grafana Integration**: Connect Grafana to the final Iceberg tables (via Trino) to visualize long-term log trends vs. real-time Kafka logs.
 
 ---
-*This document was updated by Antigravity at the end of the session on 2026-04-05.*
+*This document was updated by Antigravity at the end of the session on 2026-04-20.*

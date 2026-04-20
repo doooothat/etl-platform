@@ -66,9 +66,10 @@ RELEASES=(
     "superset:superset:./superset/superset:./superset/custom-values.yaml"
     "trino:trino:./trino:./trino/values.yaml"
     "prometheus:monitoring:prometheus-community/kube-prometheus-stack:./monitoring/custom-values.yaml"
+    # kafka is deployed via kubectl apply (see kafka/kafka.yaml, kafka/kafka-ui.yaml)
 )
 
-NAMESPACES=("keda" "airflow" "minio" "nessie" "spark" "superset" "trino" "monitoring")
+NAMESPACES=("keda" "airflow" "minio" "nessie" "spark" "superset" "trino" "monitoring" "kafka" "vector")
 
 # ── Helpers ────────────────────────────────────────────────────────────────────
 
@@ -208,6 +209,26 @@ function start_ordered() {
     else
         log_err "Bucket creation failed after retries — Nessie may not start correctly."
     fi
+
+    # ────────────────────────────────────────────────────────────────
+    # Stage 1.5: Kafka (Streaming Message Bus) – Apache official image
+    # ────────────────────────────────────────────────────────────────
+    log_stage "Stage 1.5: Kafka (Message Bus)"
+    kubectl apply -f ./kafka/kafka.yaml --namespace kafka >/dev/null
+    kubectl apply -f ./kafka/kafka-ui.yaml --namespace kafka >/dev/null
+    # Wait for Kafka Broker StatefulSet and UI Deployment
+    wait_statefulset kafka kafka 180
+    wait_deploy kafka kafka-ui 60
+
+    # ────────────────────────────────────────────────────────────────
+    # Stage 1.6: Vector (Log Shipper)
+    # ────────────────────────────────────────────────────────────────
+    log_stage "Stage 1.6: Vector (Log Shipping)"
+    kubectl apply -f ./vector/vector.yaml --namespace vector >/dev/null
+    # Vector is a DaemonSet, so we wait for its pods to be ready
+    log_wait "Waiting for Vector DaemonSet..."
+    sleep 5
+
 
     # ────────────────────────────────────────────────────────────────
     # Stage 2: Nessie + Spark Operator (parallel, both need MinIO)
@@ -430,6 +451,23 @@ function deploy_charts() {
     helm repo add spark-operator https://googlecloudplatform.github.io/spark-on-k8s-operator --quiet 2>/dev/null || true
     helm repo add prometheus-community https://prometheus-community.github.io/helm-charts --quiet 2>/dev/null || true
     helm repo update >/dev/null
+
+    # kafka is deployed via kubectl apply, not Helm
+    if [[ "$target_release" == "kafka" || "$target_release" == "kafka-ui" ]]; then
+        kubectl create namespace kafka 2>/dev/null || true
+        echo -e "\n${C_BLUE}>>> Deploying Kafka via kubectl apply <<<${C_RESET}"
+        kubectl apply -f ./kafka/kafka.yaml -n kafka
+        kubectl apply -f ./kafka/kafka-ui.yaml -n kafka
+        echo -e "Deployment complete. Run './manage-project.sh start' to bring services up."
+        return
+    fi
+    if [[ "$target_release" == "vector" ]]; then
+        kubectl create namespace vector 2>/dev/null || true
+        echo -e "\n${C_BLUE}>>> Deploying Vector via kubectl apply <<<${C_RESET}"
+        kubectl apply -f ./vector/vector.yaml -n vector
+        echo -e "Deployment complete. Run './manage-project.sh start' to bring services up."
+        return
+    fi
 
     for entry in "${RELEASES[@]}"; do
         IFS=":" read -r release namespace chart values <<< "$entry"

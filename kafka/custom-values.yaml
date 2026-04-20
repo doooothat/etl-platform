@@ -1,0 +1,77 @@
+# Bitnami Kafka: Lightweight KRaft configuration for Local ETL Platform
+# Focused on resource efficiency and FIFO (First-In-First-Out) log retention.
+
+## Global Settings
+global:
+  storageClass: "" # Ephemeral: uses default or emptyDir-like behavior if persistence disabled
+  security:
+    allowInsecureImages: true
+
+## Kafka Image
+image:
+  registry: docker.io
+  repository: bitnamilegacy/kafka
+  tag: 3.7.1
+
+## Kafka KRaft Configuration (No Zookeeper)
+kraft:
+  enabled: true
+  clusterId: "etl-platform-kafka-id"
+
+## Kafka Broker & Controller Settings
+broker:
+  replicaCount: 0 # Combined mode (controller acts as broker) or 0 if using separate controllers
+controller:
+  replicaCount: 1
+  extraEnvVars:
+    - name: KAFKA_CFG_CONTROLLER_QUORUM_VOTERS
+      value: "0@127.0.0.1:9093"
+    - name: KAFKA_KRAFT_VOTERS
+      value: "0@127.0.0.1:9093"
+    - name: KAFKA_CFG_NODE_ID
+      value: "0"
+    - name: KAFKA_CFG_CONTROLLER_LISTENER_NAMES
+      value: "CONTROLLER"
+
+## FIFO (Retention) Policies - CRITICAL FOR LOCAL ENV
+# We limit total size and time to prevent disk exhaustion.
+extraConfig: |
+  # FIFO by Size: Delete oldest segments when topic reaches ~500MB
+  log.retention.bytes=524288000
+  # FIFO by Time: Delete segments older than 2 hours
+  log.retention.hours=2
+  # Small segments for faster cleanup cycles
+  log.segment.bytes=104857600
+  # Auto-create topics for convenience
+  auto.create.topics.enable=true
+  # Enable deletion of topics
+  delete.topic.enable=true
+
+## Persistence: Disabled (Ephemeral mode to save local resources)
+persistence:
+  enabled: false
+
+## Network: Expose to Localhost
+service:
+  type: LoadBalancer
+  ports:
+    client: 9092
+  # External access for Mac (localhost:9092)
+  extraPorts:
+    - name: external
+      port: 9094
+      targetPort: 9094
+
+## Resource Limits (Lightweight)
+resources:
+  requests:
+    cpu: 250m
+    memory: 1024Mi
+  limits:
+    cpu: 1000m
+    memory: 2048Mi
+
+## Security: Plaintext (Internal/Local only)
+auth:
+  clientProtocol: plaintext
+  interBrokerProtocol: plaintext

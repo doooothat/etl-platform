@@ -1,0 +1,143 @@
+---
+# ──────────────────────────────────────────────────────────────────────────────
+# Kafka Broker – Apache Official Image (KRaft mode, single-node, ARM64-safe)
+# FIFO retention: 500MB / 2h, 100MB segment for rapid cleanup
+#
+# ✅ Key insight from /etc/kafka/docker/configure script:
+#   - Do NOT set KAFKA_LISTENERS manually
+#   - The image derives LISTENERS from ADVERTISED_LISTENERS (replacing host→0.0.0.0)
+#   - Only set KAFKA_ADVERTISED_LISTENERS to a routable DNS address
+# ──────────────────────────────────────────────────────────────────────────────
+
+# Headless service: stable pod DNS for KRaft controller quorum
+apiVersion: v1
+kind: Service
+metadata:
+  name: kafka-headless
+  namespace: kafka
+  labels:
+    app: kafka
+spec:
+  clusterIP: None
+  selector:
+    app: kafka
+  ports:
+    - name: controller
+      port: 9093
+      targetPort: 9093
+    - name: broker
+      port: 9092
+      targetPort: 9092
+
+---
+# External service: localhost:9092 access from Mac
+apiVersion: v1
+kind: Service
+metadata:
+  name: kafka
+  namespace: kafka
+  labels:
+    app: kafka
+spec:
+  type: LoadBalancer
+  selector:
+    app: kafka
+  ports:
+    - name: broker
+      port: 9092
+      targetPort: 9092
+
+---
+# StatefulSet: 1-broker KRaft cluster
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: kafka
+  namespace: kafka
+  labels:
+    app: kafka
+spec:
+  serviceName: kafka-headless
+  replicas: 1
+  selector:
+    matchLabels:
+      app: kafka
+  template:
+    metadata:
+      labels:
+        app: kafka
+    spec:
+      terminationGracePeriodSeconds: 30
+      containers:
+        - name: kafka
+          image: apache/kafka:3.9.0
+          imagePullPolicy: IfNotPresent
+          ports:
+            - containerPort: 9092
+            - containerPort: 9093
+          env:
+            # ── Cluster ID (고정 UUID) ───────────────────────────────────
+            - name: CLUSTER_ID
+              value: "MkU3OEVBNTcwNTJENDM2Qk"
+
+            # ── Node identity & KRaft ───────────────────────────────────
+            - name: KAFKA_NODE_ID
+              value: "1"
+            - name: KAFKA_PROCESS_ROLES
+              value: "broker,controller"
+            - name: KAFKA_CONTROLLER_QUORUM_VOTERS
+              value: "1@kafka-0.kafka-headless.kafka.svc.cluster.local:9093"
+
+            # ── Listeners ─────────────────────────────────────────────
+            # ✅ KAFKA_LISTENERS를 설정하지 않으면 이미지가 자동으로 0.0.0.0으로 변환
+            # ADVERTISED_LISTENERS에 CONTROLLER도 포함하여 두 리스너 모두 자동 생성
+            - name: KAFKA_ADVERTISED_LISTENERS
+              value: "PLAINTEXT://kafka-0.kafka-headless.kafka.svc.cluster.local:9092,CONTROLLER://kafka-0.kafka-headless.kafka.svc.cluster.local:9093"
+            - name: KAFKA_LISTENER_SECURITY_PROTOCOL_MAP
+              value: "PLAINTEXT:PLAINTEXT,CONTROLLER:PLAINTEXT"
+            - name: KAFKA_CONTROLLER_LISTENER_NAMES
+              value: "CONTROLLER"
+            - name: KAFKA_INTER_BROKER_LISTENER_NAME
+              value: "PLAINTEXT"
+
+            # ── Log Directory ─────────────────────────────────────────
+            - name: KAFKA_LOG_DIRS
+              value: "/var/lib/kafka/data"
+
+            # ── FIFO Retention (선입선출 용량 관리) ─────────────────────
+            - name: KAFKA_LOG_RETENTION_BYTES
+              value: "524288000"    # 500MB 초과 시 오래된 세그먼트 자동 삭제
+            - name: KAFKA_LOG_RETENTION_HOURS
+              value: "2"           # 2시간 이상 된 로그 삭제
+            - name: KAFKA_LOG_SEGMENT_BYTES
+              value: "104857600"   # 100MB 단위 세그먼트 (빠른 청소)
+            - name: KAFKA_LOG_CLEANUP_POLICY
+              value: "delete"
+
+            # ── Single-node defaults ───────────────────────────────────
+            - name: KAFKA_AUTO_CREATE_TOPICS_ENABLE
+              value: "true"
+            - name: KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR
+              value: "1"
+            - name: KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR
+              value: "1"
+            - name: KAFKA_TRANSACTION_STATE_LOG_MIN_ISR
+              value: "1"
+            - name: KAFKA_GROUP_INITIAL_REBALANCE_DELAY_MS
+              value: "0"
+
+          resources:
+            requests:
+              cpu: 250m
+              memory: 768Mi
+            limits:
+              cpu: 1000m
+              memory: 1536Mi
+
+          volumeMounts:
+            - name: kafka-logs
+              mountPath: /var/lib/kafka/data
+
+      volumes:
+        - name: kafka-logs
+          emptyDir: {}

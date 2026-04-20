@@ -1,0 +1,24 @@
+# Kafka UI: Management dashboard for the ETL Platform
+# Accessible at http://localhost:9080
+
+yaml:
+  kafka:
+    clusters:
+      - name: local-etl-kafka
+        bootstrapServers: kafka.kafka.svc.cluster.local:9092
+  auth:
+    type: disabled
+
+## Service Configuration
+service:
+  type: LoadBalancer
+  port: 9080
+
+## Resource Limits
+resources:
+  requests:
+    cpu: 100m
+    memory: 128Mi
+  limits:
+    cpu: 500m
+    memory: 512Mi
