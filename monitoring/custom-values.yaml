@@ -70,7 +70,7 @@ prometheus:
   prometheusSpec:
     # Short retention to save storage and memory
     retention: 1d
-    retentionSize: "2GB"
+    retentionSize: "850MiB"
     # Increase interval to reduce CPU spikes
     scrapeInterval: "30s"
     evaluationInterval: "30s"
@@ -88,7 +88,7 @@ prometheus:
         memory: 512Mi
       limits:
         cpu: 500m
-        memory: 1024Mi # Protect system with 1GB limit
+        memory: 1024Mi # Reverted to 1GB limit as requested
 
 # Disable heavy default alerting rules
 defaultRules:
