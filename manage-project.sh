@@ -395,6 +395,7 @@ function stop_workloads() {
             fi
 
             scale_ns "$ns" 0
+            kubectl delete daemonset --all -n "$ns" 2>/dev/null || true
             
             # Clean up Airflow Redis Pod zombie processes
             if [[ "$ns" == "airflow" ]]; then

@@ -61,7 +61,7 @@ kubectl exec -n kafka kafka-0 -- /opt/kafka/bin/kafka-console-consumer.sh --boot
 
 # Full Start / Stop (Now includes Kafka/Vector)
 ./manage-project.sh start
-./manage-project.sh stop
+./manage-project.sh stop    # Note: Vector DaemonSet is explicitly deleted during stop
 ```
 
 ## 📝 Next Session Suggestions
