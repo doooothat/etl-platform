@@ -36,7 +36,7 @@ spec:
             - --master
             - local[*]
             - --packages
-            - org.apache.iceberg:iceberg-spark-runtime-4.0_2.13:1.10.1,org.apache.iceberg:iceberg-aws-bundle:1.10.1
+            - org.apache.iceberg:iceberg-spark-runtime-4.0_2.13:1.10.1,org.apache.iceberg:iceberg-aws-bundle:1.10.1,org.apache.hadoop:hadoop-aws:3.4.1
             - --conf
             - spark.jars.ivy=/tmp/ivy
             - --conf
@@ -81,6 +81,12 @@ spec:
             - spark.driver.bindAddress=0.0.0.0
             - --conf
             - spark.ui.port=4040
+            - --conf
+            - spark.sql.catalogImplementation=hive
+            - --conf
+            - spark.sql.warehouse.dir=file:/tmp/hive/warehouse
+            - --conf
+            - spark.hadoop.hive.metastore.uris=thrift://hive-metastore.hive-metastore.svc.cluster.local:9083
             - --conf
             - hive.server2.thrift.port=10000
             - --conf

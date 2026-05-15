@@ -65,11 +65,12 @@ RELEASES=(
     "spark-operator:spark:spark-operator/spark-operator:./spark/custom-values.yaml"
     "superset:superset:./superset/superset:./superset/custom-values.yaml"
     "trino:trino:./trino:./trino/values.yaml"
+    "hive-metastore:hive-metastore:./hive-metastore:./hive-metastore/values.yaml"
     "prometheus:monitoring:prometheus-community/kube-prometheus-stack:./monitoring/custom-values.yaml"
     # kafka is deployed via kubectl apply (see kafka/kafka.yaml, kafka/kafka-ui.yaml)
 )
 
-NAMESPACES=("keda" "airflow" "minio" "nessie" "spark" "superset" "trino" "monitoring" "kafka" "vector")
+NAMESPACES=("keda" "airflow" "minio" "nessie" "spark" "superset" "trino" "monitoring" "kafka" "vector" "hive-metastore")
 
 # ── Helpers ────────────────────────────────────────────────────────────────────
 
@@ -98,6 +99,15 @@ function wait_statefulset() {
     else
         log_info "$name not ready within ${timeout}s — continuing anyway."
     fi
+}
+
+function ensure_hive_metastore_db() {
+    wait_statefulset airflow airflow-postgresql 120
+    log_wait "Ensuring Hive Metastore database exists in Airflow PostgreSQL..."
+    kubectl exec -n airflow airflow-postgresql-0 -- bash -lc \
+        "PGPASSWORD=airflow psql -U airflow -d airflow -tAc \"SELECT 1 FROM pg_database WHERE datname='metastore'\" | grep -q 1 || PGPASSWORD=airflow createdb -U airflow metastore" \
+        && log_ok "Hive Metastore database is ready." \
+        || log_err "Could not prepare Hive Metastore database."
 }
 
 # scale_ns <namespace> <replicas> [deployments-only|statefulsets-only|both(default)]
@@ -162,6 +172,13 @@ function start_ordered() {
             spark)
                 log_stage "Starting Spark Infrastructure"
                 scale_ns spark 1
+                ;;
+            hive-metastore)
+                log_stage "Starting Hive Metastore"
+                scale_ns airflow 1 statefulsets
+                ensure_hive_metastore_db
+                scale_ns hive-metastore 1
+                wait_deploy hive-metastore hive-metastore 120
                 ;;
             *)
                 log_stage "Starting $ns"
@@ -244,6 +261,12 @@ function start_ordered() {
     wait_deploy nessie nessie 180      # Nessie health-checks MinIO bucket
     wait_deploy spark spark-operator-controller 120
     wait_deploy spark spark-operator-webhook 120
+
+    log_stage "Stage 2.5: Hive Metastore (Shared View Store)"
+    scale_ns airflow 1 statefulsets
+    ensure_hive_metastore_db
+    scale_ns hive-metastore 1
+    wait_deploy hive-metastore hive-metastore 120
 
     # ────────────────────────────────────────────────────────────────
     # Stage 3: Trino + Spark Thrift Server
@@ -519,7 +542,7 @@ function deploy_charts() {
 }
 
 # ── Main ───────────────────────────────────────────────────────────────────────
-case "$1" in
+case "${1:-}" in
     start)
         start_ordered "${2:-}"
         ;;

@@ -1,0 +1,99 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: hive-metastore
+  namespace: hive-metastore
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: hive-metastore
+  template:
+    metadata:
+      labels:
+        app: hive-metastore
+    spec:
+      initContainers:
+      - name: init-metastore-db
+        image: "{{ .Values.postgresqlClient.repository }}:{{ .Values.postgresqlClient.tag }}"
+        imagePullPolicy: {{ .Values.postgresqlClient.pullPolicy }}
+        env:
+        - name: PGPASSWORD
+          value: "{{ .Values.database.password }}"
+        - name: DB_HOST
+          value: "{{ .Values.database.host }}"
+        - name: DB_PORT
+          value: "{{ .Values.database.port }}"
+        - name: DB_USER
+          value: "{{ .Values.database.user }}"
+        - name: DB_NAME
+          value: "{{ .Values.database.name }}"
+        - name: DB_BOOTSTRAP_DATABASE
+          value: "{{ .Values.database.bootstrapDatabase }}"
+        command:
+        - sh
+        - -ec
+        - |
+          until pg_isready -h "$DB_HOST" -p "$DB_PORT" -U "$DB_USER"; do
+            echo "Waiting for PostgreSQL at $DB_HOST:$DB_PORT..."
+            sleep 3
+          done
+          if ! psql -h "$DB_HOST" -p "$DB_PORT" -U "$DB_USER" -d "$DB_BOOTSTRAP_DATABASE" -tAc "SELECT 1 FROM pg_database WHERE datname='${DB_NAME}'" | grep -q 1; then
+            createdb -h "$DB_HOST" -p "$DB_PORT" -U "$DB_USER" "$DB_NAME"
+          fi
+      - name: download-driver
+        image: "{{ .Values.postgresqlClient.repository }}:{{ .Values.postgresqlClient.tag }}"
+        imagePullPolicy: {{ .Values.postgresqlClient.pullPolicy }}
+        command: ["sh", "-ec", "curl -fsSL https://jdbc.postgresql.org/download/postgresql-42.7.3.jar -o /work/postgresql-jdbc.jar && test -s /work/postgresql-jdbc.jar"]
+        volumeMounts:
+        - name: lib-vol
+          mountPath: /work
+      containers:
+      - name: hive-metastore
+        image: "{{ .Values.image.repository }}:{{ .Values.image.tag }}"
+        env:
+        - name: SERVICE_NAME
+          value: "metastore"
+        - name: DB_DRIVER
+          value: "postgres"
+        - name: SERVICE_OPTS
+          value: "-Djavax.jdo.option.ConnectionDriverName=org.postgresql.Driver -Djavax.jdo.option.ConnectionURL=jdbc:postgresql://{{ .Values.database.host }}:{{ .Values.database.port }}/{{ .Values.database.name }} -Djavax.jdo.option.ConnectionUserName={{ .Values.database.user }} -Djavax.jdo.option.ConnectionPassword={{ .Values.database.password }}"
+        - name: METASTORE_SITE_PROPERTY_fs_s3a_endpoint
+          value: "{{ .Values.s3.endpoint }}"
+        - name: METASTORE_SITE_PROPERTY_fs_s3a_access_key
+          value: "{{ .Values.s3.accessKey }}"
+        - name: METASTORE_SITE_PROPERTY_fs_s3a_secret_key
+          value: "{{ .Values.s3.secretKey }}"
+        - name: METASTORE_SITE_PROPERTY_fs_s3a_path_style_access
+          value: "true"
+        - name: METASTORE_SITE_PROPERTY_fs_s3a_impl
+          value: "org.apache.hadoop.fs.s3a.S3AFileSystem"
+        - name: METASTORE_SITE_PROPERTY_metastore_thrift_port
+          value: "9083"
+        - name: METASTORE_SITE_PROPERTY_metastore_warehouse_dir
+          value: "{{ .Values.s3.warehouseDir }}"
+        ports:
+        - containerPort: 9083
+          name: thrift
+        volumeMounts:
+        - name: lib-vol
+          mountPath: /opt/hive/lib/postgresql-jdbc.jar
+          subPath: postgresql-jdbc.jar
+        resources:
+          {{- toYaml .Values.resources | nindent 10 }}
+      volumes:
+      - name: lib-vol
+        emptyDir: {}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: hive-metastore
+  namespace: hive-metastore
+spec:
+  ports:
+  - port: 9083
+    targetPort: 9083
+    name: thrift
+  selector:
+    app: hive-metastore

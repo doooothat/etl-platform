@@ -1,6 +1,6 @@
 # 🚀 Modern ETL Platform Overview (Local K8s)
 
-This project is a local evaluation environment for a modern **Data Lakehouse** architecture, combining **Airflow**, **Spark**, **Trino**, **Nessie**, **Iceberg**, **MinIO**, **Superset**, **Kafka**, and **Vector**.
+This project is a local evaluation environment for a modern **Data Lakehouse** architecture, combining **Airflow**, **Spark**, **Trino**, **Nessie**, **Iceberg**, **Hive Metastore**, **MinIO**, **Superset**, **Kafka**, and **Vector**.
 
 ---
 
@@ -16,8 +16,10 @@ graph TD
     subgraph Data_Storage [Lakehouse Layer]
         MinIO[(MinIO S3)]
         Nessie[Nessie Catalog]
+        HiveMS[Hive Metastore]
         Spark -- "Write Iceberg V2" --> MinIO
         Spark -- "Metadata Mgmt" --> Nessie
+        HiveMS -- "View Metadata" --> Trino
     end
 
     subgraph Analysis_Processing [Processing Layer]
@@ -25,10 +27,12 @@ graph TD
         SparkThrift[Spark Thrift Server]
         Trino -- "Query Engine" --> MinIO
         Trino -- "Metadata" --> Nessie
+        Trino -- "hive catalog views" --> HiveMS
+        SparkThrift -- "Hive client" --> HiveMS
     end
 
     subgraph UX_Orchestration [Orchestration & UI]
-        Airflow[Airflow 2.10+]
+        Airflow[Airflow 3.x]
         Superset[Apache Superset]
         KafkaUI[Kafka UI]
         Grafana[Grafana Monitoring]
@@ -54,10 +58,46 @@ graph TD
 | **Grafana** | Monitoring | `prometheus-grafana.monitoring.svc` | 3000 | [http://localhost:3000](http://localhost:3000) |
 | **MinIO** | Object Storage | `minio.minio.svc` | 9000/1 | [http://localhost:9001](http://localhost:9001) |
 | **Nessie** | Git-like Catalog | `nessie.nessie.svc` | 19120 | Internal Only (REST API) |
+| **Hive Metastore** | Shared View Store | `hive-metastore.hive-metastore.svc` | 9083 | Internal Only (Thrift) |
 
 ---
 
-## 🪵 3. Real-time Log Pipeline (New)
+## 🧭 3. Catalog Layout
+
+Trino exposes multiple catalogs. The project-owned catalogs are:
+
+| Catalog | Backing Service | Intended Use |
+| :--- | :--- | :--- |
+| `iceberg` | Nessie REST catalog (`main`) + MinIO | Main Iceberg Lakehouse tables |
+| `iceberg_dev` | Nessie REST catalog (`dev`) + MinIO | Development branch/testing catalog |
+| `hive` | Hive Metastore | Reusable Trino SQL views and Hive-style metadata |
+
+Common object names:
+
+```sql
+-- Physical Iceberg tables
+SELECT * FROM iceberg.ecommerce.customers;
+SELECT * FROM iceberg.ecommerce.products;
+SELECT * FROM iceberg.ecommerce.orders;
+
+-- Reusable Trino views
+CREATE SCHEMA IF NOT EXISTS hive.shared;
+CREATE OR REPLACE VIEW hive.shared.customer_summary AS
+SELECT country, count(*) AS customer_count
+FROM iceberg.ecommerce.customers
+GROUP BY country;
+```
+
+Notes:
+
+- `iceberg` is the source-of-truth catalog for Lakehouse data.
+- `hive` is used as a view store for Trino-created views.
+- Drop individual views with `DROP VIEW`; keep shared schemas like `hive.shared` for reuse.
+- Trino also shows built-in catalogs such as `system`, `jmx`, `memory`, `tpch`, and `tpcds`.
+
+---
+
+## 🪵 4. Real-time Log Pipeline
 
 The platform now includes a production-grade log collection pipeline:
 
@@ -70,21 +110,23 @@ The platform now includes a production-grade log collection pipeline:
 
 ---
 
-## ⚡ 4. Infra & Data Management (`manage-project.sh`)
+## ⚡ 5. Infra & Data Management (`manage-project.sh`)
 
-### 🔄 Sequential Startup Logic (Stage 0 ~ 5)
+### 🔄 Sequential Startup Logic
 1.  **Stage 0**: KEDA (Autoscaler)
 2.  **Stage 1**: MinIO (Storage Setup)
 3.  **Stage 1.5/1.6**: **Kafka & Vector (Log Pipeline Setup)** ✅
 4.  **Stage 2**: Nessie & Spark Operator (Catalog Setup)
-5.  **Stage 3**: Trino & Spark Thrift Server (Processing Setup) + **Sample Data Load**
-6.  **Stage 4**: Airflow & Superset (App Setup)
-7.  **Stage 5**: Final Data Integration (Auto `init_data.sh`)
+5.  **Stage 2.5**: Hive Metastore (Shared View Store; requires Airflow PostgreSQL database bootstrap)
+6.  **Stage 3**: Trino & Spark Thrift Server (Processing Setup) + **Sample Data Load**
+7.  **Stage 4**: Airflow & Superset (App Setup)
+8.  **Stage 5**: Final Data Integration (Auto `init_data.sh`)
 
 ---
 
-## 📝 5. Operational Study Notes
+## 📝 6. Operational Study Notes
 For a deep dive into the technical challenges faced during infrastructure setup (e.g., KRaft mode configuration, ARM64 image issues), refer to the study documents in:
 - `study/study-2026-04-20-kafka-infrastructure-troubleshooting.md`
+- `study/study-2026-05-15-hive-metastore-trino-view-store.md`
 
-> **Note**: All data storage (Kafka, Redis, DBs) is **Ephemeral** by design to maintain a clean local environment. Permanent storage is represented by the MinIO S3 layer.
+> **Note**: Kafka, Redis, app DBs, and the Hive Metastore backing DB are local-development ephemeral services. Permanent Lakehouse storage is represented by the MinIO S3 layer plus Iceberg/Nessie metadata flow.
