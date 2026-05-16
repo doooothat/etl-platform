@@ -1,55 +1,38 @@
-# 🤝 AI Agent Handoff
+# AI Agent Handoff
 
-This document captures the current project state and the next operator notes after the Hive Metastore + Trino view-store integration session.
+This document captures the current project state after the data storage/catalog/materialized-view integration session.
 
-## 🕒 Last Update
-- **Timestamp**: 2026-05-15T23:55:00+09:00
+## Last Update
+
+- **Timestamp**: 2026-05-16T22:15:00+09:00
 - **Agent**: Codex
-- **Status**: Hive Metastore is integrated and verified as a Trino view-store catalog. Existing Iceberg/Nessie/MinIO query flow remains healthy.
+- **Status**: Full platform starts successfully. Trino now has four project catalogs: `iceberg`, `iceberg_dev`, `hive`, and `iceberg_hms`. Persistent Trino views work through `hive`; Trino materialized views work through the new HMS-backed `iceberg_hms` catalog.
 
-## 🛠️ Work Completed Today
+---
 
-### 1. Hive Metastore Chart Added
-- Added a local Helm chart under `hive-metastore/`.
-- Uses `apache/hive:4.0.0`.
-- Uses Airflow PostgreSQL as the backing DB host with database name `metastore`.
-- Adds an `init-metastore-db` initContainer to wait for PostgreSQL and create the `metastore` database if missing.
-- Adds a `download-driver` initContainer to download PostgreSQL JDBC driver and mount it into `/opt/hive/lib/postgresql-jdbc.jar`.
-- Uses `file:/tmp/hive/warehouse` as the Hive warehouse path because this metastore is intended as a Trino view metadata store, not a Hive managed-table storage layer.
+## Work Completed
 
-### 2. Lifecycle Script Updated
-- `manage-project.sh` now knows the `hive-metastore` Helm release and namespace.
-- Added `ensure_hive_metastore_db()` to prepare the backing database before Hive Metastore starts.
-- Full startup now includes Stage 2.5 for Hive Metastore after Nessie/Spark Operator and before Trino/Spark Thrift Server.
-- `./manage-project.sh` with no arguments now prints usage instead of failing with `$1: unbound variable`.
+### 1. Full Platform Startup Verified
 
-### 3. Trino Hive Catalog Enabled
-- Added `catalog-hive.properties` to Trino config.
-- Mounted it as `/etc/trino/catalog/hive.properties`.
-- Verified `SHOW CATALOGS` returns `hive`, `iceberg`, and `iceberg_dev`.
-- Trino is deployed from local chart as `trinodb/trino:480`.
+The platform was started with:
 
-### 4. Spark Thrift Server Connected to Hive Metastore
-- Spark Thrift Server now uses `spark.sql.catalogImplementation=hive`.
-- It connects to `thrift://hive-metastore.hive-metastore.svc.cluster.local:9083`.
-- Added `hadoop-aws:3.4.1` package to remove Spark-side S3A classpath issues.
-- Warehouse path is `file:/tmp/hive/warehouse` to avoid requiring S3A jars inside the Hive Metastore server.
+```bash
+./manage-project.sh start
+```
 
-### 5. Documentation Added
-- Added detailed case study:
-  - `study/study-2026-05-15-hive-metastore-trino-view-store.md`
-- Updated:
-  - `README.md`
-  - `overview.md`
-  - `handoff.md`
+Final startup result:
 
-## 📊 Verified Current System Status
+```text
+All services are up & Data is Ready
+```
 
-### Core Runtime
+Verified:
+
 ```text
 hive-metastore       1/1 Running
 trino                1/1 Running
 spark-thrift-server  1/1 Running
+iceberg-nessie-restore SparkApplication COMPLETED
 ```
 
 No non-running pods were present at final verification:
@@ -64,107 +47,312 @@ Result:
 No resources found
 ```
 
-### Trino Catalogs
-Verified:
+### 2. Trino Catalog Layout Expanded
 
-```bash
-kubectl exec -n trino deploy/trino -- trino --execute "SHOW CATALOGS"
-```
-
-Important catalogs:
+Trino now exposes these project catalogs:
 
 ```text
 hive
 iceberg
 iceberg_dev
+iceberg_hms
 ```
+
+Intended use:
+
+| Catalog | Backing Service | Purpose |
+| :--- | :--- | :--- |
+| `iceberg` | Nessie REST catalog, `main` ref + MinIO | Main Lakehouse tables and Spark/Trino shared CTAS marts |
+| `iceberg_dev` | Nessie REST catalog, `dev` ref + MinIO | Development branch/testing |
+| `hive` | Hive Metastore | Persistent Trino logical views |
+| `iceberg_hms` | Hive Metastore + MinIO | Trino materialized views |
 
 Built-in catalogs also appear: `system`, `jmx`, `memory`, `tpch`, `tpcds`.
 
-### Iceberg Sample Data
-Verified counts through Trino:
+### 3. Nessie-backed Materialized View Limitation Verified
+
+Attempting to create a materialized view in the Nessie-backed `iceberg` catalog failed:
 
 ```text
-iceberg.ecommerce.customers = 15
-iceberg.ecommerce.products  = 14
-iceberg.ecommerce.orders    = 20
+createMaterializedView is not supported for Iceberg REST catalog
 ```
 
-### View Store Smoke Tests
-- Spark Thrift Server -> Hive Metastore -> Trino read path was verified.
-- Trino-created view path was verified:
-  - `CREATE SCHEMA IF NOT EXISTS hive.shared`
-  - `CREATE OR REPLACE VIEW hive.shared.trino_smoke_view ...`
-  - `SELECT count(*) FROM hive.shared.trino_smoke_view`
-  - `DROP VIEW hive.shared.trino_smoke_view`
+Conclusion:
 
-The test view was removed. The test schema was also cleaned up through Spark beeline.
-
-## 🔧 Common Commands
-
-### Check Runtime
-```bash
-kubectl get pods -n hive-metastore
-kubectl get pods -n trino
-kubectl get pods -n spark -l app=spark-thrift-server
+```text
+iceberg.mart.* cannot use Trino materialized view syntax while it is backed by Nessie REST catalog.
 ```
+
+Use `iceberg.mart.*` for CTAS/managed Iceberg mart tables instead.
+
+### 4. HMS-backed Iceberg Catalog Added
+
+Added a new Trino catalog:
+
+```text
+iceberg_hms
+```
+
+This is configured as:
+
+```properties
+connector.name=iceberg
+iceberg.catalog.type=hive_metastore
+hive.metastore.uri=thrift://hive-metastore.hive-metastore.svc.cluster.local:9083
+```
+
+Purpose:
+
+```text
+Trino/Superset materialized views and HMS-backed Iceberg experiments.
+```
+
+### 5. Hive Metastore S3A Support Added
+
+Hive Metastore needed S3A support to create HMS-backed Iceberg schemas on MinIO.
+
+Changes:
+
+- Added `hive-metastore/templates/configmap.yaml`
+- Mounted explicit `hive-site.xml` and `core-site.xml`
+- Mounted `hadoop-aws.jar`
+- Mounted `aws-java-sdk-bundle.jar`
+- Added `HADOOP_CLASSPATH=/opt/hive/lib/*`
+- Changed Hive warehouse to:
+
+```text
+s3a://iceberg-data/hive-warehouse
+```
+
+This fixed schema creation such as:
+
+```sql
+CREATE SCHEMA IF NOT EXISTS iceberg_hms.mart
+WITH (location = 's3a://iceberg-data/hms-mart/');
+```
+
+### 6. Trino Materialized View Verified
+
+Created HMS-backed source table:
+
+```sql
+CREATE TABLE iceberg_hms.mart.mv_hms_test_source (
+  country varchar,
+  amount integer
+)
+WITH (format = 'PARQUET');
+
+INSERT INTO iceberg_hms.mart.mv_hms_test_source
+VALUES ('KR', 100), ('KR', 200), ('US', 50);
+```
+
+Created materialized view:
+
+```sql
+CREATE MATERIALIZED VIEW iceberg_hms.mart.mv_hms_test_sales
+WITH (format = 'PARQUET') AS
+SELECT
+  country,
+  count(*) AS order_count,
+  sum(amount) AS total_sales
+FROM iceberg_hms.mart.mv_hms_test_source
+GROUP BY country;
+```
+
+Refreshed:
+
+```sql
+REFRESH MATERIALIZED VIEW iceberg_hms.mart.mv_hms_test_sales;
+```
+
+Final verified result:
+
+```text
+KR  3  700
+US  2   75
+```
+
+Materialized view files were confirmed in MinIO:
+
+```text
+iceberg-data/hms-mart/mv_hms_test_sales-.../data/*.parquet
+iceberg-data/hms-mart/mv_hms_test_sales-.../metadata/*.metadata.json
+iceberg-data/hms-mart/mv_hms_test_sales-.../metadata/snap-*.avro
+```
+
+### 7. Spark Compatibility Checked
+
+Spark Thrift Server can see HMS metadata:
+
+```sql
+SHOW DATABASES;
+SHOW TABLES IN mart;
+```
+
+Observed:
+
+```text
+mart.mv_hms_test_source
+mart.mv_hms_test_sales
+```
+
+But current Spark configuration cannot query these HMS-backed Iceberg/Trino MV objects:
+
+- `mart.mv_hms_test_source` fails because Spark is not configured with a matching HMS-backed Iceberg catalog.
+- `mart.mv_hms_test_sales` fails because Spark does not understand Trino materialized view metadata/SQL.
+
+Operational conclusion:
+
+```text
+Use iceberg.mart.* CTAS tables for Spark/Trino shared physical marts.
+Use iceberg_hms.mart.* materialized views for Trino/Superset acceleration only.
+```
+
+### 8. Documentation Updated
+
+Added:
+
+- `overview-data-storage.md`
+- `study/study-2026-05-16-todo-materialized-view-trino-iceberg-nessie.md`
+
+Updated:
+
+- `overview.md`
+- `handoff.md`
+
+`overview-data-storage.md` is now the main guide for catalog/storage/view/mart decisions.
+
+---
+
+## Current Recommended Data Patterns
+
+| Need | Use |
+| :--- | :--- |
+| Source-of-truth Lakehouse tables | `iceberg.*` |
+| Development branch experiments | `iceberg_dev.*` |
+| Reusable always-current SQL | `hive.shared.*` persistent views |
+| Trino/Superset materialized acceleration | `iceberg_hms.mart.*` materialized views |
+| Spark/Trino shared physical mart | `iceberg.mart.*` CTAS tables |
+| Refresh orchestration | Airflow DAG |
+
+---
+
+## Common Commands
 
 ### Check Catalogs
+
 ```bash
 kubectl exec -n trino deploy/trino -- trino --execute "SHOW CATALOGS"
 ```
 
-### Query Iceberg Tables
+### Query Sample Data
+
 ```bash
 kubectl exec -n trino deploy/trino -- trino --execute "
-SELECT count(*) FROM iceberg.ecommerce.customers;
-SELECT count(*) FROM iceberg.ecommerce.products;
-SELECT count(*) FROM iceberg.ecommerce.orders;
+SELECT 'customers' AS table_name, count(*) FROM iceberg.ecommerce.customers
+UNION ALL
+SELECT 'products', count(*) FROM iceberg.ecommerce.products
+UNION ALL
+SELECT 'orders', count(*) FROM iceberg.ecommerce.orders;
 "
 ```
 
-### Create a Trino View
+Expected:
+
+```text
+customers = 15
+products  = 14
+orders    = 20
+```
+
+### Create Persistent View
+
 ```bash
 kubectl exec -n trino deploy/trino -- trino --execute "
 CREATE SCHEMA IF NOT EXISTS hive.shared;
-CREATE OR REPLACE VIEW hive.shared.customer_summary AS
-SELECT country, count(*) AS customer_count
-FROM iceberg.ecommerce.customers
-GROUP BY country;
-SELECT * FROM hive.shared.customer_summary ORDER BY country;
+CREATE OR REPLACE VIEW hive.shared.customer_count_view AS
+SELECT count(*) AS customer_count
+FROM iceberg.ecommerce.customers;
+SELECT * FROM hive.shared.customer_count_view;
 "
 ```
 
-### Drop a Trino View
+### Create Materialized View
+
 ```bash
 kubectl exec -n trino deploy/trino -- trino --execute "
-DROP VIEW IF EXISTS hive.shared.customer_summary;
+CREATE SCHEMA IF NOT EXISTS iceberg_hms.mart
+WITH (location = 's3a://iceberg-data/hms-mart/');
+
+CREATE MATERIALIZED VIEW iceberg_hms.mart.customer_count_mv
+WITH (format = 'PARQUET') AS
+SELECT count(*) AS customer_count
+FROM iceberg.ecommerce.customers;
+
+REFRESH MATERIALIZED VIEW iceberg_hms.mart.customer_count_mv;
+SELECT * FROM iceberg_hms.mart.customer_count_mv;
 "
 ```
 
-## ⚠️ Important Notes
+### Create Spark/Trino Shared CTAS Mart
 
-1. **Use `iceberg` for physical Lakehouse tables.**
-   `iceberg.ecommerce.*` is backed by Nessie REST catalog and MinIO.
+```bash
+kubectl exec -n trino deploy/trino -- trino --execute "
+CREATE SCHEMA IF NOT EXISTS iceberg.mart
+WITH (location = 's3://iceberg-data/mart/');
 
-2. **Use `hive` for reusable Trino views.**
-   `hive.shared.*` is backed by Hive Metastore.
+CREATE OR REPLACE TABLE iceberg.mart.customer_count AS
+SELECT count(*) AS customer_count
+FROM iceberg.ecommerce.customers;
 
-3. **Prefer dropping views, not shared schemas.**
-   `DROP VIEW` works from Trino. `DROP SCHEMA` can fail with a file warehouse location error, so keep shared schemas such as `hive.shared` around.
+SELECT * FROM iceberg.mart.customer_count;
+"
+```
 
-4. **Hive Metastore currently uses Airflow PostgreSQL.**
-   This is acceptable for local development. A dedicated PostgreSQL chart would be cleaner for a more production-like setup.
+Spark read:
 
-5. **PostgreSQL JDBC driver is downloaded at pod startup.**
-   For more deterministic/offline deployments, build a custom Hive Metastore image with the JDBC driver baked in.
+```bash
+kubectl exec -n spark deploy/spark-thrift-server -- \
+  /opt/spark/bin/beeline -u jdbc:hive2://localhost:10000 \
+  -e "SELECT * FROM iceberg.mart.customer_count"
+```
 
-6. **Commit is intentionally left to the user.**
-   Changes are not staged or committed.
+---
 
-## 📝 Next Session Suggestions
+## Important Notes
 
-1. Add a Superset saved database / dataset workflow for `hive.shared.*` views.
-2. Consider a dedicated Hive Metastore PostgreSQL subchart if the metastore becomes more than a local view store.
-3. Consider baking PostgreSQL JDBC driver into a small custom Hive Metastore image.
-4. Add a lightweight script or Make target for Trino view smoke tests.
+1. `iceberg_hms` is not Nessie-versioned.
+2. Trino materialized views are not supported in `iceberg` or `iceberg_dev` because those catalogs use Iceberg REST/Nessie.
+3. Spark does not understand Trino materialized view metadata.
+4. `iceberg_hms.mart.*` is currently a Trino/Superset acceleration layer.
+5. `iceberg.mart.*` remains the safer pattern for Spark/Trino shared physical marts.
+6. Materialized views require explicit `REFRESH MATERIALIZED VIEW`.
+7. CTAS marts require explicit `CREATE OR REPLACE TABLE AS`, overwrite, merge, or Spark refresh logic.
+8. Incremental refresh behavior for `iceberg_hms` materialized views has not been proven yet.
+9. Airflow refresh DAGs are the natural next operational step.
+
+---
+
+## Current Test Artifacts
+
+The following test objects may still exist:
+
+```text
+iceberg.mart.mv_test_source
+iceberg.mart.ctas_test_sales
+iceberg_hms.mart.mv_hms_test_source
+iceberg_hms.mart.mv_hms_test_sales
+```
+
+They can be kept for continued testing or dropped manually.
+
+---
+
+## Next Session Suggestions
+
+1. Add an Airflow DAG to refresh `iceberg_hms.mart.*` materialized views.
+2. Add an Airflow DAG or Spark job pattern for `iceberg.mart.*` CTAS mart refresh.
+3. Decide whether to configure Spark with a separate HMS-backed Iceberg catalog.
+4. Test whether `iceberg_hms` MV refresh is incremental or full refresh for larger append-only tables.
+5. Add Superset datasets for `hive.shared.*`, `iceberg_hms.mart.*`, and `iceberg.mart.*`.
+6. Consider replacing runtime JDBC/S3A jar wiring with a custom Hive Metastore image for deterministic startup.

@@ -32,6 +32,9 @@ spec:
               mountPath: /etc/trino/catalog/iceberg_dev.properties
               subPath: catalog-iceberg-dev.properties
             - name: catalog
+              mountPath: /etc/trino/catalog/iceberg_hms.properties
+              subPath: catalog-iceberg-hms.properties
+            - name: catalog
               mountPath: /etc/trino/catalog/hive.properties
               subPath: catalog-hive.properties
       volumes:

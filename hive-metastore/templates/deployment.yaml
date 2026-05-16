@@ -48,6 +48,20 @@ spec:
         volumeMounts:
         - name: lib-vol
           mountPath: /work
+      - name: copy-s3a-jars
+        image: "{{ .Values.image.repository }}:{{ .Values.image.tag }}"
+        imagePullPolicy: {{ .Values.image.pullPolicy }}
+        command:
+        - sh
+        - -ec
+        - |
+          cp /opt/hadoop/share/hadoop/tools/lib/hadoop-aws-*.jar /work/hadoop-aws.jar
+          cp /opt/hadoop/share/hadoop/tools/lib/aws-java-sdk-bundle-*.jar /work/aws-java-sdk-bundle.jar
+          test -s /work/hadoop-aws.jar
+          test -s /work/aws-java-sdk-bundle.jar
+        volumeMounts:
+        - name: lib-vol
+          mountPath: /work
       containers:
       - name: hive-metastore
         image: "{{ .Values.image.repository }}:{{ .Values.image.tag }}"
@@ -56,8 +70,10 @@ spec:
           value: "metastore"
         - name: DB_DRIVER
           value: "postgres"
+        - name: HADOOP_CLASSPATH
+          value: "/opt/hive/lib/*"
         - name: SERVICE_OPTS
-          value: "-Djavax.jdo.option.ConnectionDriverName=org.postgresql.Driver -Djavax.jdo.option.ConnectionURL=jdbc:postgresql://{{ .Values.database.host }}:{{ .Values.database.port }}/{{ .Values.database.name }} -Djavax.jdo.option.ConnectionUserName={{ .Values.database.user }} -Djavax.jdo.option.ConnectionPassword={{ .Values.database.password }}"
+          value: "-Djavax.jdo.option.ConnectionDriverName=org.postgresql.Driver -Djavax.jdo.option.ConnectionURL=jdbc:postgresql://{{ .Values.database.host }}:{{ .Values.database.port }}/{{ .Values.database.name }} -Djavax.jdo.option.ConnectionUserName={{ .Values.database.user }} -Djavax.jdo.option.ConnectionPassword={{ .Values.database.password }} -Dfs.s3a.endpoint={{ .Values.s3.endpoint }} -Dfs.s3a.access.key={{ .Values.s3.accessKey }} -Dfs.s3a.secret.key={{ .Values.s3.secretKey }} -Dfs.s3a.path.style.access=true -Dfs.s3a.connection.ssl.enabled=false -Dfs.s3a.impl=org.apache.hadoop.fs.s3a.S3AFileSystem -Dhive.metastore.warehouse.dir={{ .Values.s3.warehouseDir }}"
         - name: METASTORE_SITE_PROPERTY_fs_s3a_endpoint
           value: "{{ .Values.s3.endpoint }}"
         - name: METASTORE_SITE_PROPERTY_fs_s3a_access_key
@@ -79,11 +95,26 @@ spec:
         - name: lib-vol
           mountPath: /opt/hive/lib/postgresql-jdbc.jar
           subPath: postgresql-jdbc.jar
+        - name: lib-vol
+          mountPath: /opt/hive/lib/hadoop-aws.jar
+          subPath: hadoop-aws.jar
+        - name: lib-vol
+          mountPath: /opt/hive/lib/aws-java-sdk-bundle.jar
+          subPath: aws-java-sdk-bundle.jar
+        - name: config
+          mountPath: /opt/hive/conf/hive-site.xml
+          subPath: hive-site.xml
+        - name: config
+          mountPath: /opt/hadoop/etc/hadoop/core-site.xml
+          subPath: core-site.xml
         resources:
           {{- toYaml .Values.resources | nindent 10 }}
       volumes:
       - name: lib-vol
         emptyDir: {}
+      - name: config
+        configMap:
+          name: hive-metastore-config
 ---
 apiVersion: v1
 kind: Service

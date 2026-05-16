@@ -20,6 +20,7 @@ graph TD
         Spark -- "Write Iceberg V2" --> MinIO
         Spark -- "Metadata Mgmt" --> Nessie
         HiveMS -- "View Metadata" --> Trino
+        HiveMS -- "HMS-backed Iceberg Metadata" --> Trino
     end
 
     subgraph Analysis_Processing [Processing Layer]
@@ -28,6 +29,7 @@ graph TD
         Trino -- "Query Engine" --> MinIO
         Trino -- "Metadata" --> Nessie
         Trino -- "hive catalog views" --> HiveMS
+        Trino -- "iceberg_hms materialized views" --> HiveMS
         SparkThrift -- "Hive client" --> HiveMS
     end
 
@@ -58,7 +60,7 @@ graph TD
 | **Grafana** | Monitoring | `prometheus-grafana.monitoring.svc` | 3000 | [http://localhost:3000](http://localhost:3000) |
 | **MinIO** | Object Storage | `minio.minio.svc` | 9000/1 | [http://localhost:9001](http://localhost:9001) |
 | **Nessie** | Git-like Catalog | `nessie.nessie.svc` | 19120 | Internal Only (REST API) |
-| **Hive Metastore** | Shared View Store | `hive-metastore.hive-metastore.svc` | 9083 | Internal Only (Thrift) |
+| **Hive Metastore** | Shared View/MV Metadata Store | `hive-metastore.hive-metastore.svc` | 9083 | Internal Only (Thrift) |
 
 ---
 
@@ -71,6 +73,7 @@ Trino exposes multiple catalogs. The project-owned catalogs are:
 | `iceberg` | Nessie REST catalog (`main`) + MinIO | Main Iceberg Lakehouse tables |
 | `iceberg_dev` | Nessie REST catalog (`dev`) + MinIO | Development branch/testing catalog |
 | `hive` | Hive Metastore | Reusable Trino SQL views and Hive-style metadata |
+| `iceberg_hms` | Hive Metastore + MinIO | Trino materialized views and HMS-backed Iceberg tests |
 
 Common object names:
 
@@ -86,14 +89,30 @@ CREATE OR REPLACE VIEW hive.shared.customer_summary AS
 SELECT country, count(*) AS customer_count
 FROM iceberg.ecommerce.customers
 GROUP BY country;
+
+-- Trino materialized views
+CREATE SCHEMA IF NOT EXISTS iceberg_hms.mart
+WITH (location = 's3a://iceberg-data/hms-mart/');
+
+CREATE MATERIALIZED VIEW iceberg_hms.mart.customer_summary_mv
+WITH (format = 'PARQUET') AS
+SELECT country, count(*) AS customer_count
+FROM iceberg.ecommerce.customers
+GROUP BY country;
+
+REFRESH MATERIALIZED VIEW iceberg_hms.mart.customer_summary_mv;
 ```
 
 Notes:
 
 - `iceberg` is the source-of-truth catalog for Lakehouse data.
-- `hive` is used as a view store for Trino-created views.
+- `iceberg_dev` is the development branch catalog backed by Nessie.
+- `hive` is used as a view store for Trino-created persistent logical views.
+- `iceberg_hms` is used for Trino materialized views. It is not Nessie-versioned.
+- Use `iceberg.mart.*` CTAS tables when Spark and Trino both need to read the same physical mart dataset.
 - Drop individual views with `DROP VIEW`; keep shared schemas like `hive.shared` for reuse.
 - Trino also shows built-in catalogs such as `system`, `jmx`, `memory`, `tpch`, and `tpcds`.
+- See [overview-data-storage.md](./overview-data-storage.md) for the full storage/view/mart decision guide.
 
 ---
 
@@ -128,5 +147,6 @@ The platform now includes a production-grade log collection pipeline:
 For a deep dive into the technical challenges faced during infrastructure setup (e.g., KRaft mode configuration, ARM64 image issues), refer to the study documents in:
 - `study/study-2026-04-20-kafka-infrastructure-troubleshooting.md`
 - `study/study-2026-05-15-hive-metastore-trino-view-store.md`
+- `study/study-2026-05-16-todo-materialized-view-trino-iceberg-nessie.md`
 
-> **Note**: Kafka, Redis, app DBs, and the Hive Metastore backing DB are local-development ephemeral services. Permanent Lakehouse storage is represented by the MinIO S3 layer plus Iceberg/Nessie metadata flow.
+> **Note**: Kafka, Redis, app DBs, and the Hive Metastore backing DB are local-development ephemeral services. Permanent Lakehouse storage is represented by the MinIO S3 layer plus Iceberg metadata through Nessie or Hive Metastore, depending on catalog.
