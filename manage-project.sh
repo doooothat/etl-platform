@@ -26,16 +26,19 @@ fi
 #   ./manage-project.sh deploy [name]   - Uninstall & Re-install all or specific component
 #   ./manage-project.sh shutdown        - Stop the entire OrbStack engine
 #
-# Components: keda, airflow, minio, nessie, spark, superset, trino, monitoring
+# Components: keda, airflow, minio, nessie, spark, flink, superset, trino, monitoring
 #
 # Dependency order for 'start':
 #   [Stage 0] KEDA (autoscaler)
 #   [Stage 1] MinIO (Object Storage)
 #             └─ bucket 'iceberg-data' creation
+#   [Stage 1.5] Kafka + Kafka UI
+#   [Stage 1.6] Vector log shipper
 #   [Stage 2] Nessie (Catalog waits: MinIO + bucket)
 #             Spark Operator (waits: MinIO)
-#   [Stage 3] Trino (Query Engine waits: Nessie ready)
-#             Spark Thrift Server (waits: Spark Operator)
+#   [Stage 2.5] Hive Metastore (shared view store)
+#   [Stage 3] Trino + Spark Thrift Server + sample Iceberg data
+#   [Stage 3.6] Flink Kafka -> Iceberg streaming bridge
 #   [Stage 4] Airflow & Superset (Apps wait: DB/Redis Ready)
 #   [Stage 5] Data Integration (runs init_data.sh for sample data & DB links)
 #   [Stage 6] Monitoring (Prometheus & Grafana)
@@ -70,7 +73,7 @@ RELEASES=(
     # kafka is deployed via kubectl apply (see kafka/kafka.yaml, kafka/kafka-ui.yaml)
 )
 
-NAMESPACES=("keda" "airflow" "minio" "nessie" "spark" "superset" "trino" "monitoring" "kafka" "vector" "hive-metastore")
+NAMESPACES=("keda" "airflow" "minio" "nessie" "spark" "flink" "superset" "trino" "monitoring" "kafka" "vector" "hive-metastore")
 
 # ── Helpers ────────────────────────────────────────────────────────────────────
 
@@ -108,6 +111,100 @@ function ensure_hive_metastore_db() {
         "PGPASSWORD=airflow psql -U airflow -d airflow -tAc \"SELECT 1 FROM pg_database WHERE datname='metastore'\" | grep -q 1 || PGPASSWORD=airflow createdb -U airflow metastore" \
         && log_ok "Hive Metastore database is ready." \
         || log_err "Could not prepare Hive Metastore database."
+}
+
+function airflow_table_count() {
+    local conn db_user db_pass db_name
+    conn=$(kubectl get secret airflow-metadata -n airflow -o jsonpath='{.data.connection}' 2>/dev/null | base64 --decode)
+    db_user=$(printf "%s" "$conn" | sed -E 's|^postgresql://([^:]+):.*|\1|')
+    db_pass=$(printf "%s" "$conn" | sed -E 's|^postgresql://[^:]+:([^@]+)@.*|\1|')
+    db_name=$(printf "%s" "$conn" | sed -E 's|.*:5432/([^?]+).*|\1|')
+
+    kubectl exec -n airflow airflow-postgresql-0 -- bash -lc \
+        "PGPASSWORD='$db_pass' psql -U '$db_user' -d '$db_name' -tAc \"SELECT count(*) FROM pg_tables WHERE schemaname='public'\"" \
+        2>/dev/null || echo 0
+}
+
+function prepare_airflow_database() {
+    log_wait "Preparing Airflow database (migrations & admin user)..."
+
+    scale_ns airflow 1 statefulsets
+    wait_statefulset airflow airflow-postgresql 120
+    wait_statefulset airflow airflow-redis 120
+
+    # If the host or OrbStack stops abruptly while Airflow's ephemeral DB is empty,
+    # existing app pods can get stuck forever in wait-for-migrations init containers.
+    scale_ns airflow 0 deployments
+
+    kubectl delete job -n airflow airflow-run-airflow-migrations airflow-create-user 2>/dev/null || true
+
+    sed "s|/path/to/project/airflow/dags|$PROJECT_ROOT/airflow/dags|g" ./airflow/custom-values.yaml > ./airflow/custom-values.yaml.tmp
+    helm upgrade --install airflow ./airflow -n airflow -f ./airflow/custom-values.yaml.tmp --reuse-values >/dev/null
+    rm -f ./airflow/custom-values.yaml.tmp
+
+    log_wait "Verifying Airflow migrations..."
+    local table_count=0
+    for _retry in {1..12}; do
+        table_count=$(airflow_table_count)
+        if [[ "$table_count" =~ ^[0-9]+$ && "$table_count" -gt 0 ]]; then
+            log_ok "Airflow metadata DB is initialized (${table_count} tables)."
+            return 0
+        fi
+        log_info "  Airflow metadata DB is still empty, retrying in 5s... (${_retry}/12)"
+        sleep 5
+    done
+
+    log_err "Airflow metadata DB still has no tables after migration attempt."
+    log_info "Check: kubectl logs -n airflow job/airflow-run-airflow-migrations"
+    return 1
+}
+
+function ensure_flink_image() {
+    local image="custom-flink:1.20.3-iceberg"
+    if docker image inspect "$image" >/dev/null 2>&1; then
+        log_ok "Flink image $image is available."
+        return 0
+    fi
+
+    log_wait "Building local Flink image $image..."
+    docker build -t "$image" ./flink >/dev/null
+    log_ok "Flink image $image built."
+}
+
+function apply_flink_sql_config() {
+    local sql_file="./flink/sql/k8s_logs_to_iceberg.sql"
+    if [[ ! -f "$sql_file" ]]; then
+        log_err "Missing Flink SQL file: $sql_file"
+        return 1
+    fi
+
+    kubectl create namespace flink --dry-run=client -o yaml | kubectl apply -f - >/dev/null
+    kubectl create configmap flink-k8s-logs-sql \
+        -n flink \
+        --from-file=k8s_logs_to_iceberg.sql="$sql_file" \
+        --dry-run=client -o yaml | kubectl apply -f - >/dev/null
+    log_ok "Flink SQL config is synced from $sql_file."
+}
+
+function start_flink_pipeline() {
+    log_wait "Starting lightweight Flink Kafka -> Iceberg pipeline..."
+    ensure_flink_image
+    apply_flink_sql_config
+
+    kubectl delete job flink-k8s-logs-sql-runner -n flink --ignore-not-found >/dev/null
+    kubectl apply -f ./flink/flink.yaml >/dev/null
+    kubectl rollout restart deployment/flink-jobmanager deployment/flink-taskmanager -n flink >/dev/null 2>&1 || true
+    wait_deploy flink flink-jobmanager 180
+    wait_deploy flink flink-taskmanager 180
+
+    kubectl delete job flink-k8s-logs-sql-runner -n flink --ignore-not-found >/dev/null
+    kubectl apply -f ./flink/flink.yaml >/dev/null
+
+    log_wait "Waiting for Flink SQL runner to submit the streaming insert..."
+    kubectl wait --for=condition=complete --timeout=120s \
+        job/flink-k8s-logs-sql-runner -n flink 2>/dev/null \
+        && log_ok "Flink streaming insert submitted." \
+        || log_info "Flink SQL runner is still active or needs log inspection."
 }
 
 # scale_ns <namespace> <replicas> [deployments-only|statefulsets-only|both(default)]
@@ -154,9 +251,10 @@ function start_ordered() {
         case "$ns" in
             airflow)
                 log_stage "Starting Airflow Stack"
-                scale_ns airflow 1 statefulsets
-                wait_statefulset airflow airflow-postgresql 60
+                prepare_airflow_database
                 scale_ns airflow 1 deployments
+                wait_deploy airflow airflow-api-server 180
+                wait_deploy airflow airflow-scheduler 180
                 ;;
             superset)
                 log_stage "Starting Superset Stack"
@@ -172,6 +270,10 @@ function start_ordered() {
             spark)
                 log_stage "Starting Spark Infrastructure"
                 scale_ns spark 1
+                ;;
+            flink)
+                log_stage "Starting Flink Pipeline"
+                start_flink_pipeline
                 ;;
             hive-metastore)
                 log_stage "Starting Hive Metastore"
@@ -300,30 +402,18 @@ function start_ordered() {
     log_info "Sample data generation started in background (sparkapplication/iceberg-nessie-restore)."
 
     # ────────────────────────────────────────────────────────────────
+    # Stage 3.6: Flink local streaming bridge (Kafka -> Iceberg bronze)
+    # ────────────────────────────────────────────────────────────────
+    log_stage "Stage 3.6: Flink (Kafka → Iceberg Bronze)"
+    start_flink_pipeline
+
+    # ────────────────────────────────────────────────────────────────
     # Stage 4a: Airflow
     #   airflow-postgresql → airflow-redis → Migrations → Airflow apps
     # ────────────────────────────────────────────────────────────────
     log_stage "Stage 4a: Airflow (PostgreSQL → Redis → Migrations → Apps)"
 
-    # Start DB and Redis first
-    scale_ns airflow 1 statefulsets
-    wait_statefulset airflow airflow-postgresql 120
-    wait_statefulset airflow airflow-redis 120
-
-    # If DB is ephemeral, migration may be needed upon restart
-    log_wait "Preparing Airflow database (migrations & admin user)..."
-    # Delete existing Jobs to allow recreation
-    kubectl delete job -n airflow airflow-run-airflow-migrations airflow-create-user 2>/dev/null || true
-    
-    # Run migrations via Helm upgrade (handles Wait-for-migrations Init container)
-    sed "s|/path/to/project/airflow/dags|$PROJECT_ROOT/airflow/dags|g" ./airflow/custom-values.yaml > ./airflow/custom-values.yaml.tmp
-    helm upgrade --install airflow ./airflow -n airflow -f ./airflow/custom-values.yaml.tmp --reuse-values >/dev/null
-    rm -f ./airflow/custom-values.yaml.tmp
-    log_wait "Waiting for Airflow migrations to complete..."
-    kubectl wait --for=condition=complete --timeout=180s \
-        job/airflow-run-airflow-migrations -n airflow 2>/dev/null \
-        && log_ok "Airflow migrations completed." \
-        || log_info "Migration job timed out — checking logs might be necessary."
+    prepare_airflow_database
 
     # Start Deployments next
     scale_ns airflow 1 deployments
@@ -388,6 +478,7 @@ function start_ordered() {
     echo ""
     echo -e "  Airflow  → http://localhost:8080"
     echo -e "  Superset → http://localhost:8088  (admin / admin)"
+    echo -e "  Flink    → http://localhost:8081"
     echo -e "  Trino    → http://localhost:18080"
     echo -e "  MinIO    → http://localhost:9001  (admin / password)"
     echo -e "  Grafana  → http://localhost:3000  (admin / admin)"
@@ -437,6 +528,7 @@ function stop_workloads() {
             fi
             
             kubectl delete sparkapplications --all -n "$ns" 2>/dev/null || true
+            kubectl delete job --all -n "$ns" 2>/dev/null || true
             
             # Force delete PVCs and remove Finalizers
             kubectl patch pvc --all -n "$ns" -p '{"metadata":{"finalizers":null}}' 2>/dev/null || true
@@ -490,6 +582,15 @@ function deploy_charts() {
         echo -e "\n${C_BLUE}>>> Deploying Vector via kubectl apply <<<${C_RESET}"
         kubectl apply -f ./vector/vector.yaml -n vector
         echo -e "Deployment complete. Run './manage-project.sh start' to bring services up."
+        return
+    fi
+    if [[ "$target_release" == "flink" ]]; then
+        kubectl create namespace flink 2>/dev/null || true
+        echo -e "\n${C_BLUE}>>> Deploying Flink via kubectl apply <<<${C_RESET}"
+        ensure_flink_image
+        apply_flink_sql_config
+        kubectl apply -f ./flink/flink.yaml -n flink
+        echo -e "Deployment complete. Run './manage-project.sh start flink' to bring Flink up."
         return
     fi
 
