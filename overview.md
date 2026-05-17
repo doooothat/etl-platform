@@ -256,15 +256,17 @@ Command responsibilities:
 
 | Command | Purpose |
 | :--- | :--- |
-| `doctor` | Verifies required CLI tools, Docker daemon, Kubernetes connectivity, host architecture, and required repository files. |
+| `doctor` | Verifies required CLI tools (`kubectl`, `helm`, `docker`, `curl`, `jq`, and POSIX helpers), Docker daemon, Kubernetes connectivity, host architecture, and required repository files. |
 | `bootstrap` | Prepares Helm repos, chart dependencies, namespaces, and required Spark/KEDA/Prometheus CRDs. |
 | `provision` | Runs bootstrap, rebuilds local custom images, deploys all components, starts the platform, and validates it. |
 | `validate` | Checks CRDs, pod health, Spark sample restore, Nessie catalog settings, Trino queries, and Flink job health. |
 | `integration-test` | Destructive cold-start test: purges project runtime, rebuilds local images, redeploys, starts, and validates. |
 
-`integration-test --yes --no-cache` is intended for a project-dedicated local cluster. It deletes project namespaces and all Kubernetes PVs in the current cluster, so do not run it on a shared local cluster.
+`integration-test --yes --no-cache` is intended for a project-dedicated local cluster. It deletes project namespaces and all Kubernetes PVs in the current cluster, so do not run it on a shared local cluster. If a namespace remains stuck in `Terminating`, purge force-finalizes it after the normal wait window.
 
 CRDs are not deleted during purge. They are cluster-wide API type definitions, and `bootstrap` is responsible for ensuring the required CRDs exist before deployment.
+
+Nessie depends on MinIO credentials in its own namespace. Ordered startup now copies the MinIO chart secret into the Nessie namespace as `minio-creds` immediately after creating the `iceberg-data` bucket.
 
 ### 🔄 Sequential Startup Logic
 1.  **Stage 0**: KEDA (Autoscaler)

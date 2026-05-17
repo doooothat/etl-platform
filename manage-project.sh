@@ -82,7 +82,7 @@ RELEASES=(
 
 NAMESPACES=("keda" "airflow" "minio" "nessie" "spark" "flink" "superset" "trino" "monitoring" "kafka" "vector" "hive-metastore")
 LOCAL_IMAGES=("custom-spark:4.0.2-nessie" "custom-flink:1.20.3-iceberg")
-REQUIRED_TOOLS=("kubectl" "helm" "docker" "curl" "awk" "sed" "grep")
+REQUIRED_TOOLS=("kubectl" "helm" "docker" "curl" "awk" "sed" "grep" "jq")
 REQUIRED_FILES=(
     "./airflow/Chart.yaml"
     "./airflow/custom-values.yaml"
@@ -138,6 +138,44 @@ function confirm_destructive() {
     echo "Continue? (y/n)"
     read -r confirm
     [[ "$confirm" == "y" || "$confirm" == "Y" ]]
+}
+
+function force_finalize_namespace() {
+    local ns=$1
+
+    if ! kubectl get namespace "$ns" >/dev/null 2>&1; then
+        return 0
+    fi
+
+    log_wait "Force-finalizing stuck namespace: $ns"
+
+    # Best-effort cleanup for resources that can keep a namespace visible after
+    # the owning Helm release has gone away.
+    kubectl api-resources --verbs=list --namespaced -o name \
+        | xargs -n 1 kubectl delete --all -n "$ns" --ignore-not-found --wait=false >/dev/null 2>&1 || true
+    kubectl api-resources --verbs=list --namespaced -o name \
+        | xargs -n 1 kubectl patch --all -n "$ns" -p '{"metadata":{"finalizers":null}}' --type=merge >/dev/null 2>&1 || true
+
+    kubectl get namespace "$ns" -o json \
+        | jq '.spec.finalizers=[]' \
+        | kubectl replace --raw "/api/v1/namespaces/${ns}/finalize" -f - >/dev/null 2>&1 || true
+}
+
+function sync_minio_creds_for_nessie() {
+    log_wait "Syncing MinIO credentials into Nessie namespace..."
+    kubectl create namespace nessie >/dev/null 2>&1 || true
+
+    if ! kubectl get secret minio -n minio >/dev/null 2>&1; then
+        log_err "MinIO secret not found; Nessie may not start correctly."
+        return 1
+    fi
+
+    kubectl get secret minio -n minio -o json \
+        | jq '.metadata.name="minio-creds"
+              | .metadata.namespace="nessie"
+              | del(.metadata.annotations, .metadata.creationTimestamp, .metadata.resourceVersion, .metadata.uid, .metadata.managedFields)' \
+        | kubectl apply -f - >/dev/null
+    log_ok "Nessie MinIO credentials are ready."
 }
 
 function update_helm_repos() {
@@ -622,6 +660,7 @@ function start_ordered() {
     done
     if [ "$BUCKET_OK" = true ]; then
         log_ok "Bucket 'iceberg-data' is ready."
+        sync_minio_creds_for_nessie
     else
         log_err "Bucket creation failed after retries — Nessie may not start correctly."
     fi
@@ -882,8 +921,17 @@ function purge_runtime() {
             sleep 2
         done
         if kubectl get namespace "$ns" >/dev/null 2>&1; then
-            log_err "Namespace $ns is still terminating after waiting."
-            return 1
+            force_finalize_namespace "$ns"
+            for _retry in {1..15}; do
+                if ! kubectl get namespace "$ns" >/dev/null 2>&1; then
+                    break
+                fi
+                sleep 2
+            done
+            if kubectl get namespace "$ns" >/dev/null 2>&1; then
+                log_err "Namespace $ns is still terminating after force-finalize."
+                return 1
+            fi
         fi
     done
 
@@ -959,7 +1007,7 @@ function deploy_charts() {
         # Create a temporary local values file for dynamic path injection
         case "$release" in
             keda)
-                helm upgrade --install "$release" "$chart" -n "$namespace"
+                helm upgrade --install "$release" "$chart" -n "$namespace" --skip-crds --set crds.install=false
                 ensure_keda_scaledobject_crd
                 ;;
             airflow)
@@ -970,7 +1018,10 @@ function deploy_charts() {
                 ;;
             spark-operator)
                 helm upgrade --install "$release" "$chart" \
-                    -n "$namespace" -f "$values" --set webhook.enable=true
+                    -n "$namespace" -f "$values" --set webhook.enable=true --skip-crds
+                ;;
+            prometheus)
+                helm upgrade --install "$release" "$chart" -n "$namespace" -f "$values" --skip-crds --set crds.enabled=false
                 ;;
             *)
                 helm upgrade --install "$release" "$chart" -n "$namespace" -f "$values"
@@ -1128,12 +1179,15 @@ case "${1:-}" in
         ;;
     validate)
         validate_integration
+        exit $?
         ;;
     provision)
         provision_environment "${@:2}"
+        exit $?
         ;;
     integration-test)
         run_integration_test "${@:2}"
+        exit $?
         ;;
     shutdown)
         echo "Are you sure you want to stop the entire OrbStack engine? (y/n)"

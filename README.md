@@ -21,7 +21,7 @@ This repository is intended to be reproducible on a matching local Mac environme
 - macOS on Apple Silicon or Intel
 - OrbStack Kubernetes context, or an equivalent local Kubernetes cluster
 - Docker daemon available to the current user
-- `kubectl`, `helm`, `docker`, and `curl`
+- `kubectl`, `helm`, `docker`, `curl`, and `jq`
 - network access for image pulls, Helm repos, and Maven/JAR downloads
 - 8GB+ RAM allocated to the local container/K8s runtime; 12GB is more comfortable for full startup
 
@@ -74,9 +74,11 @@ Use this only on a project-dedicated local Kubernetes cluster:
 ./manage-project.sh integration-test --yes --no-cache
 ```
 
-This removes project Helm releases, kubectl-managed project resources, project namespaces, and all Kubernetes PVs in the current cluster, then rebuilds local custom images and redeploys everything. It does not modify git files or commits.
+This removes project Helm releases, kubectl-managed project resources, project namespaces, and all Kubernetes PVs in the current cluster, then rebuilds local custom images and redeploys everything. If a project namespace is stuck in `Terminating`, the purge path force-finalizes it after the normal wait period. It does not modify git files or commits.
 
 The command intentionally does not delete Kubernetes CRDs or Helm repo settings. `bootstrap` ensures required Spark, KEDA, and Prometheus CRDs exist for fresh local environments.
+
+During ordered startup, MinIO credentials are copied into the Nessie namespace as `minio-creds` after the `iceberg-data` bucket is created. This keeps Nessie startup reproducible after a full namespace/PV purge.
 
 ---
 
