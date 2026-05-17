@@ -15,7 +15,15 @@ This platform simulates a real-world enterprise data stack including:
 ---
 
 ## 🛠️ Prerequisites & Configuration
-Before starting the platform, you **MUST** configure your local environment variables.
+
+This repository is intended to be reproducible on a matching local Mac environment:
+
+- macOS on Apple Silicon or Intel
+- OrbStack Kubernetes context, or an equivalent local Kubernetes cluster
+- Docker daemon available to the current user
+- `kubectl`, `helm`, `docker`, and `curl`
+- network access for image pulls, Helm repos, and Maven/JAR downloads
+- 8GB+ RAM allocated to the local container/K8s runtime; 12GB is more comfortable for full startup
 
 ### 1. Configure `local.env` (Mandatory)
 ```bash
@@ -27,18 +35,48 @@ cp env.example local.env
 
 ## ⚡ Quick Start
 
-### 1. Start Support Services
+For a first-time clone on a matching Mac environment, run:
+
+```bash
+./manage-project.sh doctor
+./manage-project.sh bootstrap
+./manage-project.sh provision --yes --no-cache
+```
+
+`provision` performs the full local IaC flow: prerequisite checks, Helm repo setup, chart dependency setup, namespace creation, CRD bootstrap, custom Spark/Flink image rebuild, deploy, ordered start, and validation.
+
+For an already-deployed local environment, use:
+
 ```bash
 ./manage-project.sh start
 ```
 
-### 2. Check Status
+Check status:
+
 ```bash
 ./manage-project.sh status
 ```
 
-### 3. Monitoring Log Flow
+Validate the running platform:
+
+```bash
+./manage-project.sh validate
+```
+
+Monitoring log flow:
 Once started, you can see real-time logs landing in Kafka via **Kafka UI**: [http://localhost:9080](http://localhost:9080)
+
+### Destructive Cold Start Test
+
+Use this only on a project-dedicated local Kubernetes cluster:
+
+```bash
+./manage-project.sh integration-test --yes --no-cache
+```
+
+This removes project Helm releases, kubectl-managed project resources, project namespaces, and all Kubernetes PVs in the current cluster, then rebuilds local custom images and redeploys everything. It does not modify git files or commits.
+
+The command intentionally does not delete Kubernetes CRDs or Helm repo settings. `bootstrap` ensures required Spark, KEDA, and Prometheus CRDs exist for fresh local environments.
 
 ---
 
@@ -67,6 +105,7 @@ Once started, you can see real-time logs landing in Kafka via **Kafka UI**: [htt
 - **Dynamic Path Injection**: The `manage-project.sh` dynamically injects local roots into container mounts.
 - **No PVC Policy**: All temporary data is memory-backed or ephemeral for zero-residue development.
 - **Query Logic Separation**: Flink SQL is kept in `flink/sql/*.sql` and injected as a ConfigMap at startup, so streaming logic can be reviewed separately from Kubernetes YAML.
+- **Local IaC Bootstrap**: `manage-project.sh doctor`, `bootstrap`, `provision`, and `validate` make first-time setup reproducible for a third party on the same Mac/K8s toolchain.
 
 ### Version Consistency Notes
 

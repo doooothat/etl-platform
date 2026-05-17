@@ -239,6 +239,33 @@ See `airflow/dags/ephemeral_spark_thrift_dynamic_allocation_template.py` and `st
 
 ## ⚡ 8. Infra & Data Management (`manage-project.sh`)
 
+### First-Time Local Provisioning
+
+For a third-party clone on the same Mac + local Kubernetes toolchain, the intended setup path is:
+
+```bash
+cp env.example local.env
+# Set PROJECT_ROOT in local.env to the absolute clone path.
+
+./manage-project.sh doctor
+./manage-project.sh bootstrap
+./manage-project.sh provision --yes --no-cache
+```
+
+Command responsibilities:
+
+| Command | Purpose |
+| :--- | :--- |
+| `doctor` | Verifies required CLI tools, Docker daemon, Kubernetes connectivity, host architecture, and required repository files. |
+| `bootstrap` | Prepares Helm repos, chart dependencies, namespaces, and required Spark/KEDA/Prometheus CRDs. |
+| `provision` | Runs bootstrap, rebuilds local custom images, deploys all components, starts the platform, and validates it. |
+| `validate` | Checks CRDs, pod health, Spark sample restore, Nessie catalog settings, Trino queries, and Flink job health. |
+| `integration-test` | Destructive cold-start test: purges project runtime, rebuilds local images, redeploys, starts, and validates. |
+
+`integration-test --yes --no-cache` is intended for a project-dedicated local cluster. It deletes project namespaces and all Kubernetes PVs in the current cluster, so do not run it on a shared local cluster.
+
+CRDs are not deleted during purge. They are cluster-wide API type definitions, and `bootstrap` is responsible for ensuring the required CRDs exist before deployment.
+
 ### 🔄 Sequential Startup Logic
 1.  **Stage 0**: KEDA (Autoscaler)
 2.  **Stage 1**: MinIO (Storage Setup)
