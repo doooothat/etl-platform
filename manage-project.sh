@@ -23,10 +23,13 @@ fi
 #   ./manage-project.sh start [name]    - Ordered startup or start specific component
 #   ./manage-project.sh stop [name]     - Scale down all or specific component (wipes PVCs)
 #   ./manage-project.sh status [name]   - Show status of all or specific component
+#   ./manage-project.sh doctor          - Check local tooling, K8s access, and required files
+#   ./manage-project.sh bootstrap       - Prepare Helm repos, namespaces, chart deps, and CRDs
 #   ./manage-project.sh deploy [name]   - Uninstall & Re-install all or specific component
 #   ./manage-project.sh purge [--yes]   - Delete project Helm releases, K8s resources, namespaces, PVs
 #   ./manage-project.sh rebuild-images [--no-cache] - Rebuild local custom Spark/Flink images
 #   ./manage-project.sh validate        - Run post-start integration checks
+#   ./manage-project.sh provision [--yes] [--no-cache] - Doctor, bootstrap, rebuild, deploy, start, validate
 #   ./manage-project.sh integration-test [--yes] [--no-cache] - Purge, rebuild, deploy, start, validate
 #   ./manage-project.sh shutdown        - Stop the entire OrbStack engine
 #
@@ -79,6 +82,37 @@ RELEASES=(
 
 NAMESPACES=("keda" "airflow" "minio" "nessie" "spark" "flink" "superset" "trino" "monitoring" "kafka" "vector" "hive-metastore")
 LOCAL_IMAGES=("custom-spark:4.0.2-nessie" "custom-flink:1.20.3-iceberg")
+REQUIRED_TOOLS=("kubectl" "helm" "docker" "curl" "awk" "sed" "grep")
+REQUIRED_FILES=(
+    "./airflow/Chart.yaml"
+    "./airflow/custom-values.yaml"
+    "./flink/Dockerfile"
+    "./flink/flink.yaml"
+    "./flink/sql/k8s_logs_to_iceberg.sql"
+    "./hive-metastore/Chart.yaml"
+    "./kafka/kafka.yaml"
+    "./kafka/kafka-ui.yaml"
+    "./minio/minio/Chart.yaml"
+    "./monitoring/custom-values.yaml"
+    "./nessie/nessie/Chart.yaml"
+    "./spark/Chart.yaml"
+    "./spark/Dockerfile"
+    "./spark/init-data-job.yaml"
+    "./spark/spark-thrift-server.yaml"
+    "./superset/superset/Chart.yaml"
+    "./trino/Chart.yaml"
+    "./vector/vector.yaml"
+    "./versions.yaml"
+)
+REQUIRED_CRDS=(
+    "scaledobjects.keda.sh"
+    "sparkapplications.sparkoperator.k8s.io"
+    "scheduledsparkapplications.sparkoperator.k8s.io"
+    "prometheuses.monitoring.coreos.com"
+    "servicemonitors.monitoring.coreos.com"
+    "prometheusrules.monitoring.coreos.com"
+    "alertmanagers.monitoring.coreos.com"
+)
 
 # ── Helpers ────────────────────────────────────────────────────────────────────
 
@@ -104,6 +138,155 @@ function confirm_destructive() {
     echo "Continue? (y/n)"
     read -r confirm
     [[ "$confirm" == "y" || "$confirm" == "Y" ]]
+}
+
+function update_helm_repos() {
+    log_wait "Ensuring Helm repositories..."
+    helm repo add kedacore https://kedacore.github.io/charts --quiet 2>/dev/null || true
+    helm repo add prometheus-community https://prometheus-community.github.io/helm-charts --quiet 2>/dev/null || true
+    helm repo update >/dev/null
+    log_ok "Helm repositories are ready."
+}
+
+function ensure_namespaces() {
+    log_wait "Ensuring project namespaces..."
+    for ns in "${NAMESPACES[@]}"; do
+        kubectl create namespace "$ns" --dry-run=client -o yaml | kubectl apply -f - >/dev/null
+    done
+    log_ok "Project namespaces are ready."
+}
+
+function ensure_chart_dependencies() {
+    log_wait "Ensuring local chart dependencies..."
+    local charts=("./airflow" "./minio/minio" "./nessie/nessie" "./spark" "./superset/superset" "./hive-metastore" "./trino")
+    for chart in "${charts[@]}"; do
+        if [[ -f "$chart/Chart.yaml" ]] && grep -q '^dependencies:' "$chart/Chart.yaml"; then
+            helm dependency build "$chart" >/dev/null
+        fi
+    done
+    log_ok "Local chart dependencies are ready."
+}
+
+function apply_helm_template_crds() {
+    local release=$1 chart=$2 namespace=$3
+    local rendered
+    rendered=$(mktemp)
+    helm template "$release" "$chart" -n "$namespace" --include-crds > "$rendered"
+    awk '
+        function flush() {
+            if (doc ~ /(^|\n)kind: CustomResourceDefinition(\n|$)/) {
+                printf "%s", doc
+            }
+        }
+        /^---[[:space:]]*$/ {
+            flush()
+            doc = "---\n"
+            next
+        }
+        { doc = doc $0 "\n" }
+        END { flush() }
+    ' "$rendered" \
+        | kubectl apply --server-side --force-conflicts -f - >/dev/null
+    rm -f "$rendered"
+}
+
+function ensure_crds() {
+    log_wait "Ensuring project CRDs..."
+    update_helm_repos
+
+    for crd_file in ./spark/crds/*.yaml; do
+        local crd_name
+        crd_name=$(sed -n 's/^  name: //p' "$crd_file" | head -n 1)
+        if [[ -z "$crd_name" ]]; then
+            log_err "Could not determine CRD name from $crd_file"
+            return 1
+        fi
+        if kubectl get crd "$crd_name" >/dev/null 2>&1; then
+            log_ok "CRD $crd_name already exists."
+        else
+            kubectl create -f "$crd_file" >/dev/null
+            log_ok "CRD $crd_name created."
+        fi
+    done
+
+    apply_helm_template_crds keda kedacore/keda keda
+    apply_helm_template_crds prometheus prometheus-community/kube-prometheus-stack monitoring
+
+    for crd in "${REQUIRED_CRDS[@]}"; do
+        kubectl wait --for=condition=Established --timeout=90s crd/"$crd" >/dev/null
+        log_ok "CRD $crd is established."
+    done
+}
+
+function check_required_crds() {
+    log_wait "Checking required CRDs..."
+    for crd in "${REQUIRED_CRDS[@]}"; do
+        if ! kubectl get crd "$crd" >/dev/null 2>&1; then
+            log_err "Missing CRD: $crd"
+            return 1
+        fi
+    done
+    log_ok "Required CRDs are present."
+}
+
+function doctor_environment() {
+    log_stage "Environment Doctor"
+
+    local missing=0
+    log_wait "Checking required CLI tools..."
+    for tool in "${REQUIRED_TOOLS[@]}"; do
+        if command -v "$tool" >/dev/null 2>&1; then
+            log_ok "$tool: $(command -v "$tool")"
+        else
+            log_err "Missing required tool: $tool"
+            missing=1
+        fi
+    done
+
+    if command -v orbctl >/dev/null 2>&1; then
+        log_ok "orbctl: $(command -v orbctl)"
+    else
+        log_info "orbctl not found; continuing because another local K8s provider may be used."
+    fi
+
+    log_wait "Checking Kubernetes connectivity..."
+    kubectl version --client >/dev/null
+    kubectl cluster-info >/dev/null
+    log_ok "Kubernetes cluster is reachable: $(kubectl config current-context)"
+
+    log_wait "Checking Docker daemon..."
+    docker info >/dev/null
+    log_ok "Docker daemon is reachable."
+
+    log_wait "Checking required repository files..."
+    for file in "${REQUIRED_FILES[@]}"; do
+        if [[ -e "$file" ]]; then
+            log_ok "$file"
+        else
+            log_err "Missing required file: $file"
+            missing=1
+        fi
+    done
+
+    log_info "Host architecture: $(uname -m)"
+    log_info "Project root: $PROJECT_ROOT"
+
+    if [[ "$missing" -ne 0 ]]; then
+        return 1
+    fi
+
+    log_ok "Environment doctor passed."
+}
+
+function bootstrap_environment() {
+    log_stage "Bootstrap IaC Prerequisites"
+    doctor_environment
+    update_helm_repos
+    ensure_chart_dependencies
+    ensure_namespaces
+    ensure_crds
+    check_required_crds
+    log_ok "Bootstrap completed."
 }
 
 # wait_deploy <namespace> <deployment-name> [timeout-seconds=120]
@@ -241,14 +424,8 @@ function ensure_keda_scaledobject_crd() {
         return 0
     fi
 
-    log_wait "Restoring missing KEDA ScaledObject CRD from Helm manifest..."
-    helm get manifest keda -n keda \
-        | awk '
-            /^# Source: keda\/templates\/crds\/crd-scaledobjects.yaml$/ {emit=1; next}
-            emit && /^---$/ {exit}
-            emit {print}
-        ' \
-        | kubectl apply -f - >/dev/null
+    log_wait "Installing missing KEDA CRDs from chart..."
+    apply_helm_template_crds keda kedacore/keda keda
     kubectl wait --for=condition=Established --timeout=60s crd/scaledobjects.keda.sh >/dev/null
     log_ok "KEDA ScaledObject CRD is ready."
 }
@@ -730,11 +907,7 @@ function deploy_charts() {
         echo -e "${C_YELLOW}Deploying only: $target_release${C_RESET}"
     fi
 
-    # Ensure mandatory Helm repositories are present
-    echo -e "\n${C_BLUE}>>> Updating Helm repositories... <<<${C_RESET}"
-    helm repo add kedacore https://kedacore.github.io/charts --quiet 2>/dev/null || true
-    helm repo add prometheus-community https://prometheus-community.github.io/helm-charts --quiet 2>/dev/null || true
-    helm repo update >/dev/null
+    update_helm_repos
 
     # kafka is deployed via kubectl apply, not Helm
     if [[ "$target_release" == "kafka" || "$target_release" == "kafka-ui" ]]; then
@@ -820,6 +993,8 @@ function deploy_charts() {
 function validate_integration() {
     log_stage "Integration Validation"
 
+    check_required_crds
+
     log_wait "Checking project pods..."
     local bad_pods
     bad_pods=$(kubectl get pods -A 2>/dev/null | awk '
@@ -897,6 +1072,19 @@ function run_integration_test() {
     validate_integration
 }
 
+function provision_environment() {
+    if ! confirm_destructive "WARNING: Provision will bootstrap prerequisites, rebuild custom images, deploy all components, start the full platform, and validate it." "$@"; then
+        echo "Provision cancelled."
+        return 0
+    fi
+
+    bootstrap_environment
+    rebuild_local_images "$@"
+    deploy_charts "" --yes
+    start_ordered
+    validate_integration
+}
+
 # ── Main ───────────────────────────────────────────────────────────────────────
 case "${1:-}" in
     start)
@@ -919,6 +1107,12 @@ case "${1:-}" in
             done
         fi
         ;;
+    doctor)
+        doctor_environment
+        ;;
+    bootstrap)
+        bootstrap_environment
+        ;;
     deploy)
         if [[ "${2:-}" == "--yes" ]]; then
             deploy_charts "" "${@:2}"
@@ -935,6 +1129,9 @@ case "${1:-}" in
     validate)
         validate_integration
         ;;
+    provision)
+        provision_environment "${@:2}"
+        ;;
     integration-test)
         run_integration_test "${@:2}"
         ;;
@@ -948,7 +1145,7 @@ case "${1:-}" in
         fi
         ;;
     *)
-        echo "Usage: $0 {start|stop|status|deploy [name]|purge|rebuild-images|validate|integration-test|shutdown}"
+        echo "Usage: $0 {start|stop|status|doctor|bootstrap|deploy [name]|purge|rebuild-images|validate|provision|integration-test|shutdown}"
         echo ""
         echo "Examples:"
         echo "  $0 start            # Start all"
@@ -956,8 +1153,11 @@ case "${1:-}" in
         echo "  $0 start superset   # Start only Superset"
         echo "  $0 stop airflow     # Stop only Airflow"
         echo "  $0 status trino     # Status of Trino"
+        echo "  $0 doctor           # Check local tools, cluster access, and required files"
+        echo "  $0 bootstrap        # Prepare Helm repos, namespaces, chart deps, and CRDs"
         echo "  $0 purge --yes      # Delete project runtime resources"
         echo "  $0 rebuild-images --no-cache"
+        echo "  $0 provision --yes --no-cache"
         echo "  $0 integration-test --yes --no-cache"
         exit 1
         ;;
