@@ -15,7 +15,7 @@ spec:
     spec:
       initContainers:
       - name: init-metastore-db
-        image: "{{ .Values.postgresqlClient.repository }}:{{ .Values.postgresqlClient.tag }}"
+        image: "{{ .Values.postgresqlClient.repository }}{{ if .Values.postgresqlClient.digest }}@{{ .Values.postgresqlClient.digest }}{{ else }}:{{ .Values.postgresqlClient.tag }}{{ end }}"
         imagePullPolicy: {{ .Values.postgresqlClient.pullPolicy }}
         env:
         - name: PGPASSWORD
@@ -42,7 +42,7 @@ spec:
             createdb -h "$DB_HOST" -p "$DB_PORT" -U "$DB_USER" "$DB_NAME"
           fi
       - name: download-driver
-        image: "{{ .Values.postgresqlClient.repository }}:{{ .Values.postgresqlClient.tag }}"
+        image: "{{ .Values.postgresqlClient.repository }}{{ if .Values.postgresqlClient.digest }}@{{ .Values.postgresqlClient.digest }}{{ else }}:{{ .Values.postgresqlClient.tag }}{{ end }}"
         imagePullPolicy: {{ .Values.postgresqlClient.pullPolicy }}
         command: ["sh", "-ec", "curl -fsSL https://jdbc.postgresql.org/download/postgresql-42.7.3.jar -o /work/postgresql-jdbc.jar && test -s /work/postgresql-jdbc.jar"]
         volumeMounts:

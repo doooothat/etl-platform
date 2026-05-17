@@ -189,7 +189,8 @@ extraConfigMountPath: "/app/configs"
 
 image:
   repository: apachesuperset.docker.scarf.sh/apache/superset
-  tag: ~
+  tag: "5.0.0"
+  digest: ""
   pullPolicy: IfNotPresent
 
 imagePullSecrets: []
@@ -197,6 +198,7 @@ imagePullSecrets: []
 initImage:
   repository: apache/superset
   tag: dockerize
+  digest: ""
   pullPolicy: IfNotPresent
 
 service:
@@ -303,7 +305,7 @@ supersetNode:
   # @default -- a container waiting for postgres
   initContainers:
     - name: wait-for-postgres
-      image: "{{ .Values.initImage.repository }}:{{ .Values.initImage.tag }}"
+      image: "{{ .Values.initImage.repository }}{{ if .Values.initImage.digest }}@{{ .Values.initImage.digest }}{{ else }}:{{ .Values.initImage.tag }}{{ end }}"
       imagePullPolicy: "{{ .Values.initImage.pullPolicy }}"
       envFrom:
         - secretRef:
@@ -401,7 +403,7 @@ supersetWorker:
   # @default -- a container waiting for postgres and redis
   initContainers:
     - name: wait-for-postgres-redis
-      image: "{{ .Values.initImage.repository }}:{{ .Values.initImage.tag }}"
+      image: "{{ .Values.initImage.repository }}{{ if .Values.initImage.digest }}@{{ .Values.initImage.digest }}{{ else }}:{{ .Values.initImage.tag }}{{ end }}"
       imagePullPolicy: "{{ .Values.initImage.pullPolicy }}"
       envFrom:
         - secretRef:
@@ -483,7 +485,7 @@ supersetCeleryBeat:
   # @default -- a container waiting for postgres
   initContainers:
     - name: wait-for-postgres-redis
-      image: "{{ .Values.initImage.repository }}:{{ .Values.initImage.tag }}"
+      image: "{{ .Values.initImage.repository }}{{ if .Values.initImage.digest }}@{{ .Values.initImage.digest }}{{ else }}:{{ .Values.initImage.tag }}{{ end }}"
       imagePullPolicy: "{{ .Values.initImage.pullPolicy }}"
       envFrom:
         - secretRef:
@@ -576,7 +578,7 @@ supersetCeleryFlower:
   # @default -- a container waiting for postgres and redis
   initContainers:
     - name: wait-for-postgres-redis
-      image: "{{ .Values.initImage.repository }}:{{ .Values.initImage.tag }}"
+      image: "{{ .Values.initImage.repository }}{{ if .Values.initImage.digest }}@{{ .Values.initImage.digest }}{{ else }}:{{ .Values.initImage.tag }}{{ end }}"
       imagePullPolicy: "{{ .Values.initImage.pullPolicy }}"
       envFrom:
         - secretRef:
@@ -629,7 +631,8 @@ supersetWebsockets:
   image:
     # -- There is no official image (yet), this one is community-supported
     repository: oneacrefund/superset-websocket
-    tag: latest
+    tag: pinned-by-digest
+    digest: "sha256:e17289bd558bf5c42b65a6383d1f36c26a8045b9cbd926e65f560ee6608237bf"
     pullPolicy: IfNotPresent
   # -- The config.json to pass to the server, see https://github.com/apache/superset/tree/master/superset-websocket
   # Note that the configuration can also read from environment variables (which will have priority), see https://github.com/apache/superset/blob/master/superset-websocket/src/config.ts for a list of supported variables
@@ -740,7 +743,7 @@ init:
   # @default -- a container waiting for postgres
   initContainers:
     - name: wait-for-postgres
-      image: "{{ .Values.initImage.repository }}:{{ .Values.initImage.tag }}"
+      image: "{{ .Values.initImage.repository }}{{ if .Values.initImage.digest }}@{{ .Values.initImage.digest }}{{ else }}:{{ .Values.initImage.tag }}{{ end }}"
       imagePullPolicy: "{{ .Values.initImage.pullPolicy }}"
       envFrom:
         - secretRef:

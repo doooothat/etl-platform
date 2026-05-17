@@ -73,7 +73,7 @@ spec:
       {{- end }}
       containers:
         - name: "{{ .Chart.Name }}-ws"
-          image: "{{ .Values.supersetWebsockets.image.repository }}:{{ .Values.supersetWebsockets.image.tag }}"
+          image: "{{ .Values.supersetWebsockets.image.repository }}{{ if .Values.supersetWebsockets.image.digest }}@{{ .Values.supersetWebsockets.image.digest }}{{ else }}:{{ .Values.supersetWebsockets.image.tag }}{{ end }}"
           imagePullPolicy: {{ .Values.supersetWebsockets.image.pullPolicy }}
           {{- if .Values.supersetWebsockets.containerSecurityContext }}
           securityContext: {{- toYaml .Values.supersetWebsockets.containerSecurityContext | nindent 12 }}

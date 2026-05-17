@@ -1,4 +1,14 @@
 # Ephemeral MinIO Configuration for Local Dev
+image:
+  repository: quay.io/minio/minio
+  tag: RELEASE.2024-12-18T13-15-44Z
+  pullPolicy: IfNotPresent
+
+mcImage:
+  repository: quay.io/minio/mc
+  tag: RELEASE.2024-11-21T17-21-54Z
+  pullPolicy: IfNotPresent
+
 mode: standalone
 persistence:
   enabled: false

@@ -60,12 +60,39 @@ Once started, you can see real-time logs landing in Kafka via **Kafka UI**: [htt
 ## 📝 Key Features
 - **Iceberg Lakehouse Catalog**: Trino and Spark query Iceberg tables through Nessie REST catalog with data stored in MinIO.
 - **Trino View Store**: Trino stores reusable SQL views in the `hive` catalog backed by Hive Metastore.
+- **DAG-Scoped Spark SQL Runtime**: Airflow can create an ephemeral Spark Thrift Server per DAG run so multiple tasks share `global_temp` views without using the always-on shared Thrift Server.
 - **Real-time Log Collection**: Vector collects all K8s logs and buffers them in **Apache Kafka 3.9 (KRaft)**.
 - **Lightweight Streaming Persist**: Flink reads `k8s_logs` from Kafka and appends raw log events to `iceberg.logs.k8s_logs_bronze` for Trino/Superset queries.
 - **FIFO Data Retention**: Logic-based cleanup (500MB / 2hr) to prevent local disk exhaustion.
 - **Dynamic Path Injection**: The `manage-project.sh` dynamically injects local roots into container mounts.
 - **No PVC Policy**: All temporary data is memory-backed or ephemeral for zero-residue development.
 - **Query Logic Separation**: Flink SQL is kept in `flink/sql/*.sql` and injected as a ConfigMap at startup, so streaming logic can be reviewed separately from Kubernetes YAML.
+
+### Version Consistency Notes
+
+The repository now keeps an explicit version matrix in [`versions.yaml`](./versions.yaml). The currently validated Spark path is centered on Spark 4.0.2:
+
+| Component | Expected Runtime |
+| :--- | :--- |
+| Spark runtime | `custom-spark:4.0.2-nessie` |
+| Spark base image | `apache/spark:4.0.2` |
+| Iceberg Spark runtime | `iceberg-spark-runtime-4.0_2.13:1.10.1` |
+| Spark Operator pod image | `ghcr.io/kubeflow/spark-operator/controller:2.4.0` |
+
+Explicitly aligned in repository manifests:
+
+- Airflow PostgreSQL, Superset PostgreSQL, and Hive Metastore PostgreSQL client use the same PostgreSQL `18.3` image digest.
+- Trino references are aligned to `trinodb/trino:480`.
+- Kafka manifests are aligned around Kafka `3.9.0`; the legacy Bitnami values file is marked as non-authoritative.
+- Kafka UI and the Airflow kubectl helper no longer use `latest`.
+- Nessie REST catalog warehouse URIs use `s3://iceberg-data/`, and MinIO request signing is disabled on the Nessie side so Spark, Flink, and Trino use their explicit local credentials directly.
+- Local custom images are part of the reproducible setup: `manage-project.sh` builds `custom-spark:4.0.2-nessie` and `custom-flink:1.20.3-iceberg` when they are missing.
+
+Remaining items that are intentionally not forced into one image family:
+
+- The running Spark binary reports `4.0.2`, but one completed SparkApplication driver carried mixed labels: `spark-version=4.0.0` and `version=4.0.2`.
+- Airflow Redis remains on the official `redis:7.2-bookworm` image, while Superset Redis remains on the Bitnami Redis image required by its chart. Both are explicitly pinned instead of being forced into one image family.
+- The Superset websocket component is disabled in local values; its community image default is also pinned by digest before anyone enables websocket async queries.
 
 ### Streaming Log Query
 
@@ -85,6 +112,8 @@ Apply SQL changes by editing the SQL file and restarting the local Flink bridge:
 ```
 
 The local Flink deployment intentionally uses no PVC. JobManager/TaskManager state is ephemeral, and the pipeline starts from new Kafka messages after restart. For production, keep the same logical flow but move checkpoint/savepoint and warehouse storage to durable object storage.
+
+`./manage-project.sh start flink` cancels any already-running local Flink jobs and removes local `/tmp/flink-checkpoints` before resubmitting the SQL runner. This keeps local redeploys deterministic after wiping Nessie/MinIO state.
 
 ---
 
@@ -131,6 +160,14 @@ Trino: Ad hoc SQL, BI, data exploration, shared views
 Spark: Large backfills, batch ETL, heavy historical reprocessing
 ```
 
+For DAGs that need task-level retries while sharing Spark temporary state, use a DAG-scoped Spark Thrift Server pattern:
+
+```text
+Airflow DAG run -> ephemeral Spark Thrift Server -> SQL task A/B/C -> cleanup
+```
+
+In that pattern, the Spark driver stays alive for the DAG run, `global_temp` views are shared between SQL tasks, and only Spark executors scale out dynamically. See the 2026-05-17 study note for the validated template and caveats.
+
 ---
 
 ## ✅ Verified Environment
@@ -140,3 +177,4 @@ Spark: Large backfills, batch ETL, heavy historical reprocessing
 
 ---
 > **Learn More**: See [overview.md](./overview.md) for detailed architecture diagrams and component roles. See [study/study-2026-05-15-hive-metastore-trino-view-store.md](./study/study-2026-05-15-hive-metastore-trino-view-store.md) for the Hive Metastore troubleshooting case study.
+> See also [study/study-2026-05-17-airflow-dag-scoped-spark-thrift-server.md](./study/study-2026-05-17-airflow-dag-scoped-spark-thrift-server.md) for the Airflow DAG-scoped Spark Thrift Server validation.

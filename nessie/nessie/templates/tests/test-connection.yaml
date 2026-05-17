@@ -11,12 +11,12 @@ metadata:
 spec:
   containers:
     - name: wget
-      image: busybox
+      image: busybox:1.37.0
       command: ['wget']
       args: ['{{ include "nessie.fullname" . }}:{{ get (first .Values.service.ports) "number" }}']
   initContainers:
     - name: sleep
-      image: busybox
+      image: busybox:1.37.0
       command: [ 'sleep', '10' ]
   restartPolicy: Never
 {{- end }}

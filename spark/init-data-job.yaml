@@ -30,7 +30,7 @@ spec:
         value: us-east-1
     initContainers:
       - name: setup-ivy
-        image: busybox
+        image: busybox:1.37.0
         command:
           ["sh", "-c", "mkdir -p /tmp/cache /tmp/jars && chmod -R 777 /tmp"]
         volumeMounts:
@@ -47,7 +47,7 @@ spec:
     memory: "1g"
     initContainers:
       - name: setup-ivy
-        image: busybox
+        image: busybox:1.37.0
         command:
           ["sh", "-c", "mkdir -p /tmp/cache /tmp/jars && chmod -R 777 /tmp"]
         volumeMounts:
