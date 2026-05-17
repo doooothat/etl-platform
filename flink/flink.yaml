@@ -1,0 +1,185 @@
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: flink
+
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: flink-jobmanager
+  namespace: flink
+spec:
+  type: LoadBalancer
+  selector:
+    app: flink
+    component: jobmanager
+  ports:
+    - name: rpc
+      port: 6123
+      targetPort: 6123
+    - name: blob
+      port: 6124
+      targetPort: 6124
+    - name: ui
+      port: 8081
+      targetPort: 8081
+
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: flink-jobmanager
+  namespace: flink
+  labels:
+    app: flink
+    component: jobmanager
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: flink
+      component: jobmanager
+  template:
+    metadata:
+      labels:
+        app: flink
+        component: jobmanager
+    spec:
+      containers:
+        - name: jobmanager
+          image: custom-flink:1.20.3-iceberg
+          imagePullPolicy: IfNotPresent
+          args: ["jobmanager"]
+          ports:
+            - containerPort: 6123
+              name: rpc
+            - containerPort: 6124
+              name: blob
+            - containerPort: 8081
+              name: ui
+          env:
+            - name: FLINK_PROPERTIES
+              value: |
+                jobmanager.rpc.address: flink-jobmanager
+                rest.address: flink-jobmanager
+                rest.bind-address: 0.0.0.0
+                taskmanager.numberOfTaskSlots: 2
+                parallelism.default: 1
+                state.checkpoints.dir: file:///tmp/flink-checkpoints
+          resources:
+            requests:
+              cpu: 250m
+              memory: 768Mi
+            limits:
+              cpu: 500m
+              memory: 1Gi
+          volumeMounts:
+            - name: tmp
+              mountPath: /tmp
+      volumes:
+        - name: tmp
+          emptyDir: {}
+
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: flink-taskmanager
+  namespace: flink
+  labels:
+    app: flink
+    component: taskmanager
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: flink
+      component: taskmanager
+  template:
+    metadata:
+      labels:
+        app: flink
+        component: taskmanager
+    spec:
+      containers:
+        - name: taskmanager
+          image: custom-flink:1.20.3-iceberg
+          imagePullPolicy: IfNotPresent
+          args: ["taskmanager"]
+          env:
+            - name: FLINK_PROPERTIES
+              value: |
+                jobmanager.rpc.address: flink-jobmanager
+                rest.address: flink-jobmanager
+                rest.bind-address: 0.0.0.0
+                taskmanager.numberOfTaskSlots: 2
+                parallelism.default: 1
+                state.checkpoints.dir: file:///tmp/flink-checkpoints
+          resources:
+            requests:
+              cpu: 500m
+              memory: 1536Mi
+            limits:
+              cpu: "1"
+              memory: 2Gi
+          volumeMounts:
+            - name: tmp
+              mountPath: /tmp
+      volumes:
+        - name: tmp
+          emptyDir: {}
+
+---
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: flink-k8s-logs-sql-runner
+  namespace: flink
+  labels:
+    app: flink-k8s-logs-sql-runner
+spec:
+  backoffLimit: 1
+  template:
+    metadata:
+      labels:
+        app: flink-k8s-logs-sql-runner
+    spec:
+      restartPolicy: Never
+      initContainers:
+        - name: wait-for-jobmanager
+          image: curlimages/curl:8.11.1
+          command:
+            - sh
+            - -c
+            - |
+              until curl -fsS http://flink-jobmanager.flink.svc.cluster.local:8081/overview >/dev/null; do
+                echo "waiting for Flink JobManager..."
+                sleep 3
+              done
+      containers:
+        - name: sql-runner
+          image: custom-flink:1.20.3-iceberg
+          imagePullPolicy: IfNotPresent
+          command:
+            - sh
+            - -c
+            - |
+              printf "%s\n" "$FLINK_PROPERTIES" >> /opt/flink/conf/flink-conf.yaml
+              exec /opt/flink/bin/sql-client.sh -f /opt/flink/sql/k8s_logs_to_iceberg.sql
+          env:
+            - name: FLINK_PROPERTIES
+              value: |
+                jobmanager.rpc.address: flink-jobmanager
+                rest.address: flink-jobmanager
+                rest.port: 8081
+                parallelism.default: 1
+          volumeMounts:
+            - name: sql
+              mountPath: /opt/flink/sql
+              readOnly: true
+      volumes:
+        - name: sql
+          configMap:
+            name: flink-k8s-logs-sql
