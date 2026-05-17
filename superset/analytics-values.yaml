@@ -4,7 +4,8 @@
 image:
   registry: docker.io
   repository: bitnami/postgresql
-  tag: "latest"
+  tag: "18.3.0"
+  digest: sha256:9b62e6057d781853916a712ad2591a607de4529160e07c2eaf58d75ef6c45b9d
   pullPolicy: IfNotPresent
 
 auth:

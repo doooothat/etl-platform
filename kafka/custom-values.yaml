@@ -1,3 +1,9 @@
+# Legacy Bitnami Kafka Helm values kept for reference.
+#
+# The active local deployment is kafka/kafka.yaml and uses apache/kafka:3.9.0.
+# Keep this file on the same Kafka version if it is reused, but do not treat it
+# as the source of truth for the current cluster.
+#
 # Bitnami Kafka: Lightweight KRaft configuration for Local ETL Platform
 # Focused on resource efficiency and FIFO (First-In-First-Out) log retention.
 
@@ -11,7 +17,7 @@ global:
 image:
   registry: docker.io
   repository: bitnamilegacy/kafka
-  tag: 3.7.1
+  tag: 3.9.0
 
 ## Kafka KRaft Configuration (No Zookeeper)
 kraft:

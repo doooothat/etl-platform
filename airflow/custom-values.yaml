@@ -1,10 +1,35 @@
 # Custom values for local Kubernetes deployment (Development Mode)
+defaultAirflowRepository: apache/airflow
+defaultAirflowTag: "3.0.2"
+
+images:
+  airflow:
+    repository: apache/airflow
+    tag: "3.0.2"
+    digest: "sha256:d1a74224f2a653e7eba97cd631125524fa0eb97cf9e76342d623931e554c9fd9"
+  statsd:
+    repository: quay.io/prometheus/statsd-exporter
+    tag: "v0.28.0"
+  redis:
+    repository: redis
+    tag: "7.2-bookworm"
+  pgbouncer:
+    repository: apache/airflow
+    tag: "airflow-pgbouncer-2025.03.05-1.23.1"
+  pgbouncerExporter:
+    repository: apache/airflow
+    tag: "airflow-pgbouncer-exporter-2025.03.05-0.18.0"
+  gitSync:
+    repository: registry.k8s.io/git-sync/git-sync
+    tag: "v4.3.0"
+
 postgresql:
   enabled: true
   image:
     registry: docker.io
     repository: bitnami/postgresql
-    tag: "latest"
+    tag: "18.3.0"
+    digest: "sha256:9b62e6057d781853916a712ad2591a607de4529160e07c2eaf58d75ef6c45b9d"
   auth:
     username: airflow
     password: airflow

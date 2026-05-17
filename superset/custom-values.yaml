@@ -3,6 +3,17 @@
 
 runAsUser: 0
 
+image:
+  repository: apachesuperset.docker.scarf.sh/apache/superset
+  tag: "5.0.0"
+  digest: "sha256:09735adaae3945c5a8fabbeca31a7954c8c74de195702ba61622aee8604d5c55"
+  pullPolicy: IfNotPresent
+
+initImage:
+  repository: apache/superset
+  tag: dockerize
+  digest: "sha256:afe59523a6c8774c3b16d0f44146b2e52f327a7d26a47b4cc63b904fcdedf057"
+
 bootstrapScript: |
   #!/bin/bash
   set -e
@@ -38,7 +49,8 @@ postgresql:
   image:
     registry: docker.io
     repository: bitnami/postgresql
-    tag: "latest"
+    tag: "18.3.0"
+    digest: "sha256:9b62e6057d781853916a712ad2591a607de4529160e07c2eaf58d75ef6c45b9d"
   auth:
     username: superset
     password: superset
@@ -58,7 +70,8 @@ redis:
   image:
     registry: docker.io
     repository: bitnami/redis
-    tag: "latest"
+    tag: "8.4.0"
+    digest: "sha256:412da89feed59b1a45b0c1fd9d07cdb2e2283cf4db2e5a1604762ad03d53af6d"
   auth: { enabled: false }
   master:
     persistence:

@@ -2,6 +2,7 @@
 versionStoreType: IN_MEMORY
 
 image:
+  repository: ghcr.io/projectnessie/nessie
   tag: "0.107.4"
   pullPolicy: IfNotPresent
 
@@ -25,7 +26,7 @@ catalog:
     defaultWarehouse: local
     warehouses:
       - name: local
-        location: s3a://iceberg-data/
+        location: s3://iceberg-data/
   storage:
     s3:
       defaultOptions:
@@ -33,6 +34,7 @@ catalog:
         region: us-east-1
         pathStyleAccess: true
         authType: STATIC
+        requestSigningEnabled: false
         accessKeySecret:
           name: minio-creds
           awsAccessKeyId: rootUser

@@ -1,0 +1,89 @@
+# Local ETL Platform version matrix.
+#
+# This file records the intended explicit runtime versions for local
+# development. Some Helm charts still carry their own defaults; prefer these
+# values in project-owned custom values and manifests.
+
+spark:
+  runtimeImage: custom-spark:4.0.2-nessie
+  buildContext: ./spark
+  apacheSpark: 4.0.2
+  scala: 2.13
+  icebergSparkRuntime: org.apache.iceberg:iceberg-spark-runtime-4.0_2.13:1.10.1
+  icebergAwsBundle: org.apache.iceberg:iceberg-aws-bundle:1.10.1
+  hadoopAws: org.apache.hadoop:hadoop-aws:3.4.1
+  nessieSparkExtension: 0.107.4
+
+catalog:
+  nessie: 0.107.4
+  nessieWarehouse: s3://iceberg-data/
+  nessieS3RequestSigningEnabled: false
+  hiveMetastore: 4.0.0
+  trino: 480
+
+orchestration:
+  airflow: 3.0.2
+  airflowImage: apache/airflow:3.0.2
+  airflowDigest: sha256:d1a74224f2a653e7eba97cd631125524fa0eb97cf9e76342d623931e554c9fd9
+  airflowStatsd: quay.io/prometheus/statsd-exporter:v0.28.0
+  airflowRedis: redis:7.2-bookworm
+  sparkOperatorImage: ghcr.io/kubeflow/spark-operator/controller:2.4.0
+  kubectlHelper: bitnami/kubectl:1.33.9
+
+streaming:
+  kafka: apache/kafka:3.9.0
+  flink: custom-flink:1.20.3-iceberg
+  flinkBuildContext: ./flink
+  vector: timberio/vector:0.34.1-distroless-libc
+
+analytics:
+  superset: apache/superset:5.0.0
+  supersetImage: apachesuperset.docker.scarf.sh/apache/superset:5.0.0
+  supersetDigest: sha256:09735adaae3945c5a8fabbeca31a7954c8c74de195702ba61622aee8604d5c55
+  supersetInitImage:
+    image: apache/superset:dockerize
+    digest: sha256:afe59523a6c8774c3b16d0f44146b2e52f327a7d26a47b4cc63b904fcdedf057
+
+storage:
+  minio: quay.io/minio/minio:RELEASE.2024-12-18T13-15-44Z
+  minioClient: quay.io/minio/mc:RELEASE.2024-11-21T17-21-54Z
+
+monitoring:
+  grafana: grafana/grafana:12.4.3
+  grafanaSidecar: quay.io/kiwigrid/k8s-sidecar:2.6.0
+  prometheusOperator: quay.io/prometheus-operator/prometheus-operator:v0.90.1
+  prometheusConfigReloader: quay.io/prometheus-operator/prometheus-config-reloader:v0.90.1
+  prometheus: quay.io/prometheus/prometheus:v3.11.2
+  kubeStateMetrics: registry.k8s.io/kube-state-metrics/kube-state-metrics:v2.18.0
+
+databases:
+  postgresql:
+    image: docker.io/bitnami/postgresql:18.3.0
+    digest: sha256:9b62e6057d781853916a712ad2591a607de4529160e07c2eaf58d75ef6c45b9d
+    usedBy:
+      - airflow metadata database
+      - hive metastore database bootstrap/client
+      - superset metadata database
+  airflowRedis:
+    image: redis:7.2-bookworm
+    digest: sha256:a39bcfd02a18afc6b8799ee87dde8b65d51f4dc54a5b1ca706a32ae3273c6445
+  supersetRedis:
+    image: docker.io/bitnami/redis:8.4.0
+    digest: sha256:412da89feed59b1a45b0c1fd9d07cdb2e2283cf4db2e5a1604762ad03d53af6d
+
+ui:
+  kafkaUi:
+    image: provectuslabs/kafka-ui
+    digest: sha256:8f2ff02d64b0a7a2b71b6b3b3148b85f66d00ec20ad40c30bdcd415d46d31818
+  nessieHelmTest:
+    image: busybox:1.37.0
+
+notUnified:
+  redis:
+    reason: Airflow chart currently uses the official Redis image while Superset chart uses Bitnami Redis. Switching either image family can change chart entrypoint and environment behavior, so both are explicitly pinned instead of forced into one image family.
+  sparkOperatorHelmMetadata:
+    reason: This was aligned by the 2026-05-17 redeploy. Keep using the local ./spark chart so Helm metadata stays at 2.4.0.
+  sparkApplicationLabels:
+    reason: The running Spark binary reports 4.0.2, but completed SparkApplication driver labels can include spark-version=4.0.0. Treat binary and image as source of truth until labels are cleaned up.
+  supersetWebsocket:
+    reason: The Superset websocket component is disabled in local values, but its community image default is pinned by digest in the local chart before anyone enables GLOBAL_ASYNC_QUERIES websocket mode.

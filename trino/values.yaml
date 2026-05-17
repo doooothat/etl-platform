@@ -9,7 +9,7 @@ service:
 
 nessie:
   uri: "http://nessie.nessie.svc.cluster.local:19120"
-  warehouse: "s3a://iceberg-data/"
+  warehouse: "s3://iceberg-data/"
 
 minio:
   endpoint: "http://minio.minio.svc.cluster.local:9000"

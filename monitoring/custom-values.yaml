@@ -8,6 +8,13 @@ alertmanager:
 ## Grafana: Enabled (Essential for visualization)
 grafana:
   enabled: true
+  image:
+    repository: grafana/grafana
+    tag: "12.4.3"
+  sidecar:
+    image:
+      repository: kiwigrid/k8s-sidecar
+      tag: "2.6.0"
   adminPassword: "admin" # Set default admin password
   # Change port from 80 to 3000 and use LoadBalancer type
   service:
@@ -46,6 +53,10 @@ nodeExporter:
 ## Kube State Metrics: Enabled (Crucial for monitoring Pod CPU/Memory)
 kube-state-metrics:
   enabled: true
+  image:
+    registry: registry.k8s.io
+    repository: kube-state-metrics/kube-state-metrics
+    tag: "v2.18.0"
   resources:
     requests:
       cpu: 50m
@@ -57,6 +68,15 @@ kube-state-metrics:
 ## Prometheus Operator / Prometheus Server
 prometheusOperator:
   enabled: true
+  image:
+    registry: quay.io
+    repository: prometheus-operator/prometheus-operator
+    tag: "v0.90.1"
+  prometheusConfigReloader:
+    image:
+      registry: quay.io
+      repository: prometheus-operator/prometheus-config-reloader
+      tag: "v0.90.1"
   resources:
     requests:
       cpu: 50m
@@ -68,6 +88,10 @@ prometheusOperator:
 prometheus:
   enabled: true
   prometheusSpec:
+    image:
+      registry: quay.io
+      repository: prometheus/prometheus
+      tag: "v3.11.2"
     # Short retention to save storage and memory
     retention: 1d
     retentionSize: "850MiB"

@@ -18,7 +18,7 @@ spec:
       serviceAccountName: spark-operator-sa
       initContainers:
         - name: setup-dirs
-          image: busybox
+          image: busybox:1.37.0
           command: ["sh", "-c", "mkdir -p /tmp/ivy && chmod -R 777 /tmp"]
           volumeMounts:
             - name: tmp-vol

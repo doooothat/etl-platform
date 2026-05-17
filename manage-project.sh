@@ -23,7 +23,15 @@ fi
 #   ./manage-project.sh start [name]    - Ordered startup or start specific component
 #   ./manage-project.sh stop [name]     - Scale down all or specific component (wipes PVCs)
 #   ./manage-project.sh status [name]   - Show status of all or specific component
+#   ./manage-project.sh doctor          - Check local tooling, K8s access, and required files
+#   ./manage-project.sh bootstrap       - Prepare Helm repos, namespaces, chart deps, and CRDs
 #   ./manage-project.sh deploy [name]   - Uninstall & Re-install all or specific component
+#   ./manage-project.sh purge [--yes]   - Delete project Helm releases, K8s resources, namespaces, PVs
+#   ./manage-project.sh rebuild-images [--no-cache] - Rebuild local custom Spark/Flink images
+#   ./manage-project.sh validate        - Run post-start integration checks
+#   ./manage-project.sh test [name]     - Run functional smoke tests
+#   ./manage-project.sh provision [--yes] [--no-cache] - Doctor, bootstrap, rebuild, deploy, start, validate
+#   ./manage-project.sh integration-test [--yes] [--no-cache] - Purge, rebuild, deploy, start, validate
 #   ./manage-project.sh shutdown        - Stop the entire OrbStack engine
 #
 # Components: keda, airflow, minio, nessie, spark, flink, superset, trino, monitoring
@@ -65,7 +73,7 @@ RELEASES=(
     "airflow:airflow:./airflow:./airflow/custom-values.yaml"
     "minio:minio:./minio/minio:./minio/custom-values.yaml"
     "nessie:nessie:./nessie/nessie:./nessie/custom-values.yaml"
-    "spark-operator:spark:spark-operator/spark-operator:./spark/custom-values.yaml"
+    "spark-operator:spark:./spark:./spark/custom-values.yaml"
     "superset:superset:./superset/superset:./superset/custom-values.yaml"
     "trino:trino:./trino:./trino/values.yaml"
     "hive-metastore:hive-metastore:./hive-metastore:./hive-metastore/values.yaml"
@@ -74,8 +82,251 @@ RELEASES=(
 )
 
 NAMESPACES=("keda" "airflow" "minio" "nessie" "spark" "flink" "superset" "trino" "monitoring" "kafka" "vector" "hive-metastore")
+LOCAL_IMAGES=("custom-spark:4.0.2-nessie" "custom-flink:1.20.3-iceberg")
+REQUIRED_TOOLS=("kubectl" "helm" "docker" "curl" "awk" "sed" "grep" "jq")
+REQUIRED_FILES=(
+    "./airflow/Chart.yaml"
+    "./airflow/custom-values.yaml"
+    "./flink/Dockerfile"
+    "./flink/flink.yaml"
+    "./flink/sql/k8s_logs_to_iceberg.sql"
+    "./hive-metastore/Chart.yaml"
+    "./kafka/kafka.yaml"
+    "./kafka/kafka-ui.yaml"
+    "./minio/minio/Chart.yaml"
+    "./monitoring/custom-values.yaml"
+    "./nessie/nessie/Chart.yaml"
+    "./spark/Chart.yaml"
+    "./spark/Dockerfile"
+    "./spark/init-data-job.yaml"
+    "./spark/spark-thrift-server.yaml"
+    "./superset/superset/Chart.yaml"
+    "./trino/Chart.yaml"
+    "./vector/vector.yaml"
+    "./versions.yaml"
+)
+REQUIRED_CRDS=(
+    "scaledobjects.keda.sh"
+    "sparkapplications.sparkoperator.k8s.io"
+    "scheduledsparkapplications.sparkoperator.k8s.io"
+    "prometheuses.monitoring.coreos.com"
+    "servicemonitors.monitoring.coreos.com"
+    "prometheusrules.monitoring.coreos.com"
+    "alertmanagers.monitoring.coreos.com"
+)
 
 # ── Helpers ────────────────────────────────────────────────────────────────────
+
+function has_arg() {
+    local needle=$1
+    shift || true
+    for arg in "$@"; do
+        if [[ "$arg" == "$needle" ]]; then
+            return 0
+        fi
+    done
+    return 1
+}
+
+function confirm_destructive() {
+    local message=$1
+    shift || true
+    if has_arg "--yes" "$@"; then
+        return 0
+    fi
+
+    echo -e "${C_RED}${message}${C_RESET}"
+    echo "Continue? (y/n)"
+    read -r confirm
+    [[ "$confirm" == "y" || "$confirm" == "Y" ]]
+}
+
+function force_finalize_namespace() {
+    local ns=$1
+
+    if ! kubectl get namespace "$ns" >/dev/null 2>&1; then
+        return 0
+    fi
+
+    log_wait "Force-finalizing stuck namespace: $ns"
+
+    # Best-effort cleanup for resources that can keep a namespace visible after
+    # the owning Helm release has gone away.
+    kubectl api-resources --verbs=list --namespaced -o name \
+        | xargs -n 1 kubectl delete --all -n "$ns" --ignore-not-found --wait=false >/dev/null 2>&1 || true
+    kubectl api-resources --verbs=list --namespaced -o name \
+        | xargs -n 1 kubectl patch --all -n "$ns" -p '{"metadata":{"finalizers":null}}' --type=merge >/dev/null 2>&1 || true
+
+    kubectl get namespace "$ns" -o json \
+        | jq '.spec.finalizers=[]' \
+        | kubectl replace --raw "/api/v1/namespaces/${ns}/finalize" -f - >/dev/null 2>&1 || true
+}
+
+function sync_minio_creds_for_nessie() {
+    log_wait "Syncing MinIO credentials into Nessie namespace..."
+    kubectl create namespace nessie >/dev/null 2>&1 || true
+
+    if ! kubectl get secret minio -n minio >/dev/null 2>&1; then
+        log_err "MinIO secret not found; Nessie may not start correctly."
+        return 1
+    fi
+
+    kubectl get secret minio -n minio -o json \
+        | jq '.metadata.name="minio-creds"
+              | .metadata.namespace="nessie"
+              | del(.metadata.annotations, .metadata.creationTimestamp, .metadata.resourceVersion, .metadata.uid, .metadata.managedFields)' \
+        | kubectl apply -f - >/dev/null
+    log_ok "Nessie MinIO credentials are ready."
+}
+
+function update_helm_repos() {
+    log_wait "Ensuring Helm repositories..."
+    helm repo add kedacore https://kedacore.github.io/charts --quiet 2>/dev/null || true
+    helm repo add prometheus-community https://prometheus-community.github.io/helm-charts --quiet 2>/dev/null || true
+    helm repo update >/dev/null
+    log_ok "Helm repositories are ready."
+}
+
+function ensure_namespaces() {
+    log_wait "Ensuring project namespaces..."
+    for ns in "${NAMESPACES[@]}"; do
+        kubectl create namespace "$ns" --dry-run=client -o yaml | kubectl apply -f - >/dev/null
+    done
+    log_ok "Project namespaces are ready."
+}
+
+function ensure_chart_dependencies() {
+    log_wait "Ensuring local chart dependencies..."
+    local charts=("./airflow" "./minio/minio" "./nessie/nessie" "./spark" "./superset/superset" "./hive-metastore" "./trino")
+    for chart in "${charts[@]}"; do
+        if [[ -f "$chart/Chart.yaml" ]] && grep -q '^dependencies:' "$chart/Chart.yaml"; then
+            helm dependency build "$chart" >/dev/null
+        fi
+    done
+    log_ok "Local chart dependencies are ready."
+}
+
+function apply_helm_template_crds() {
+    local release=$1 chart=$2 namespace=$3
+    local rendered
+    rendered=$(mktemp)
+    helm template "$release" "$chart" -n "$namespace" --include-crds > "$rendered"
+    awk '
+        function flush() {
+            if (doc ~ /(^|\n)kind: CustomResourceDefinition(\n|$)/) {
+                printf "%s", doc
+            }
+        }
+        /^---[[:space:]]*$/ {
+            flush()
+            doc = "---\n"
+            next
+        }
+        { doc = doc $0 "\n" }
+        END { flush() }
+    ' "$rendered" \
+        | kubectl apply --server-side --force-conflicts -f - >/dev/null
+    rm -f "$rendered"
+}
+
+function ensure_crds() {
+    log_wait "Ensuring project CRDs..."
+    update_helm_repos
+
+    for crd_file in ./spark/crds/*.yaml; do
+        local crd_name
+        crd_name=$(sed -n 's/^  name: //p' "$crd_file" | head -n 1)
+        if [[ -z "$crd_name" ]]; then
+            log_err "Could not determine CRD name from $crd_file"
+            return 1
+        fi
+        if kubectl get crd "$crd_name" >/dev/null 2>&1; then
+            log_ok "CRD $crd_name already exists."
+        else
+            kubectl create -f "$crd_file" >/dev/null
+            log_ok "CRD $crd_name created."
+        fi
+    done
+
+    apply_helm_template_crds keda kedacore/keda keda
+    apply_helm_template_crds prometheus prometheus-community/kube-prometheus-stack monitoring
+
+    for crd in "${REQUIRED_CRDS[@]}"; do
+        kubectl wait --for=condition=Established --timeout=90s crd/"$crd" >/dev/null
+        log_ok "CRD $crd is established."
+    done
+}
+
+function check_required_crds() {
+    log_wait "Checking required CRDs..."
+    for crd in "${REQUIRED_CRDS[@]}"; do
+        if ! kubectl get crd "$crd" >/dev/null 2>&1; then
+            log_err "Missing CRD: $crd"
+            return 1
+        fi
+    done
+    log_ok "Required CRDs are present."
+}
+
+function doctor_environment() {
+    log_stage "Environment Doctor"
+
+    local missing=0
+    log_wait "Checking required CLI tools..."
+    for tool in "${REQUIRED_TOOLS[@]}"; do
+        if command -v "$tool" >/dev/null 2>&1; then
+            log_ok "$tool: $(command -v "$tool")"
+        else
+            log_err "Missing required tool: $tool"
+            missing=1
+        fi
+    done
+
+    if command -v orbctl >/dev/null 2>&1; then
+        log_ok "orbctl: $(command -v orbctl)"
+    else
+        log_info "orbctl not found; continuing because another local K8s provider may be used."
+    fi
+
+    log_wait "Checking Kubernetes connectivity..."
+    kubectl version --client >/dev/null
+    kubectl cluster-info >/dev/null
+    log_ok "Kubernetes cluster is reachable: $(kubectl config current-context)"
+
+    log_wait "Checking Docker daemon..."
+    docker info >/dev/null
+    log_ok "Docker daemon is reachable."
+
+    log_wait "Checking required repository files..."
+    for file in "${REQUIRED_FILES[@]}"; do
+        if [[ -e "$file" ]]; then
+            log_ok "$file"
+        else
+            log_err "Missing required file: $file"
+            missing=1
+        fi
+    done
+
+    log_info "Host architecture: $(uname -m)"
+    log_info "Project root: $PROJECT_ROOT"
+
+    if [[ "$missing" -ne 0 ]]; then
+        return 1
+    fi
+
+    log_ok "Environment doctor passed."
+}
+
+function bootstrap_environment() {
+    log_stage "Bootstrap IaC Prerequisites"
+    doctor_environment
+    update_helm_repos
+    ensure_chart_dependencies
+    ensure_namespaces
+    ensure_crds
+    check_required_crds
+    log_ok "Bootstrap completed."
+}
 
 # wait_deploy <namespace> <deployment-name> [timeout-seconds=120]
 function wait_deploy() {
@@ -171,6 +422,53 @@ function ensure_flink_image() {
     log_ok "Flink image $image built."
 }
 
+function ensure_spark_image() {
+    local image="custom-spark:4.0.2-nessie"
+    if docker image inspect "$image" >/dev/null 2>&1; then
+        log_ok "Spark image $image is available."
+        return 0
+    fi
+
+    log_wait "Building local Spark image $image..."
+    docker build -t "$image" ./spark >/dev/null
+    log_ok "Spark image $image built."
+}
+
+function rebuild_local_images() {
+    local no_cache_flag=""
+    if has_arg "--no-cache" "$@"; then
+        no_cache_flag="--no-cache"
+    fi
+
+    log_stage "Rebuilding Local Custom Images"
+    for image in "${LOCAL_IMAGES[@]}"; do
+        if docker image inspect "$image" >/dev/null 2>&1; then
+            log_wait "Removing local image $image..."
+            docker rmi -f "$image" >/dev/null || true
+        fi
+    done
+
+    log_wait "Building custom-spark:4.0.2-nessie..."
+    docker build $no_cache_flag -t custom-spark:4.0.2-nessie ./spark >/dev/null
+    log_ok "custom-spark:4.0.2-nessie built."
+
+    log_wait "Building custom-flink:1.20.3-iceberg..."
+    docker build $no_cache_flag -t custom-flink:1.20.3-iceberg ./flink >/dev/null
+    log_ok "custom-flink:1.20.3-iceberg built."
+}
+
+function ensure_keda_scaledobject_crd() {
+    if kubectl get crd scaledobjects.keda.sh >/dev/null 2>&1; then
+        log_ok "KEDA ScaledObject CRD is available."
+        return 0
+    fi
+
+    log_wait "Installing missing KEDA CRDs from chart..."
+    apply_helm_template_crds keda kedacore/keda keda
+    kubectl wait --for=condition=Established --timeout=60s crd/scaledobjects.keda.sh >/dev/null
+    log_ok "KEDA ScaledObject CRD is ready."
+}
+
 function apply_flink_sql_config() {
     local sql_file="./flink/sql/k8s_logs_to_iceberg.sql"
     if [[ ! -f "$sql_file" ]]; then
@@ -186,6 +484,28 @@ function apply_flink_sql_config() {
     log_ok "Flink SQL config is synced from $sql_file."
 }
 
+function reset_flink_runtime_state() {
+    if ! kubectl get deployment flink-jobmanager -n flink >/dev/null 2>&1; then
+        return 0
+    fi
+
+    log_wait "Resetting Flink jobs and local checkpoints before resubmission..."
+    local running_jobs
+    running_jobs=$(
+        kubectl exec -n flink deploy/flink-jobmanager -- /opt/flink/bin/flink list -r 2>/dev/null \
+            | awk '/ : / && /\((RUNNING|RESTARTING|FAILING|CANCELLING|CREATED|SCHEDULED|DEPLOYING|INITIALIZING)\)$/ {print $4}' \
+            || true
+    )
+    for job_id in $running_jobs; do
+        log_info "  Cancelling Flink job $job_id"
+        kubectl exec -n flink deploy/flink-jobmanager -- /opt/flink/bin/flink cancel "$job_id" >/dev/null 2>&1 || true
+    done
+
+    kubectl exec -n flink deploy/flink-jobmanager -- rm -rf /tmp/flink-checkpoints /tmp/flink-savepoints >/dev/null 2>&1 || true
+    kubectl exec -n flink deploy/flink-taskmanager -- rm -rf /tmp/flink-checkpoints /tmp/flink-savepoints >/dev/null 2>&1 || true
+    log_ok "Flink runtime state reset."
+}
+
 function start_flink_pipeline() {
     log_wait "Starting lightweight Flink Kafka -> Iceberg pipeline..."
     ensure_flink_image
@@ -193,9 +513,11 @@ function start_flink_pipeline() {
 
     kubectl delete job flink-k8s-logs-sql-runner -n flink --ignore-not-found >/dev/null
     kubectl apply -f ./flink/flink.yaml >/dev/null
+    reset_flink_runtime_state
     kubectl rollout restart deployment/flink-jobmanager deployment/flink-taskmanager -n flink >/dev/null 2>&1 || true
     wait_deploy flink flink-jobmanager 180
     wait_deploy flink flink-taskmanager 180
+    reset_flink_runtime_state
 
     kubectl delete job flink-k8s-logs-sql-runner -n flink --ignore-not-found >/dev/null
     kubectl apply -f ./flink/flink.yaml >/dev/null
@@ -269,7 +591,20 @@ function start_ordered() {
                 ;;
             spark)
                 log_stage "Starting Spark Infrastructure"
+                ensure_spark_image
                 scale_ns spark 1
+                wait_deploy spark spark-operator-controller 120
+                wait_deploy spark spark-operator-webhook 120
+
+                kubectl scale deployment spark-thrift-server --replicas=1 -n spark 2>/dev/null || true
+                kubectl rollout status deployment/spark-thrift-server -n spark --timeout=120s 2>/dev/null \
+                    && log_ok "Spark Thrift Server is ready." \
+                    || log_info "Spark Thrift Server still starting (non-critical)."
+
+                log_wait "Refreshing Iceberg sample data via Spark Job..."
+                kubectl delete sparkapplication iceberg-nessie-restore -n spark --ignore-not-found --wait=false >/dev/null
+                kubectl apply -f ./spark/init-data-job.yaml >/dev/null
+                log_info "Sample data generation started in background (sparkapplication/iceberg-nessie-restore)."
                 ;;
             flink)
                 log_stage "Starting Flink Pipeline"
@@ -303,6 +638,7 @@ function start_ordered() {
     kubectl wait --for=condition=available --timeout=60s \
         deployment/keda-operator -n keda 2>/dev/null \
         && log_ok "KEDA ready." || log_info "KEDA skipped (may already be running)."
+    ensure_keda_scaledobject_crd
 
     # ────────────────────────────────────────────────────────────────
     # Stage 1: MinIO (standalone, no upstream deps)
@@ -325,6 +661,7 @@ function start_ordered() {
     done
     if [ "$BUCKET_OK" = true ]; then
         log_ok "Bucket 'iceberg-data' is ready."
+        sync_minio_creds_for_nessie
     else
         log_err "Bucket creation failed after retries — Nessie may not start correctly."
     fi
@@ -333,6 +670,7 @@ function start_ordered() {
     # Stage 1.5: Kafka (Streaming Message Bus) – Apache official image
     # ────────────────────────────────────────────────────────────────
     log_stage "Stage 1.5: Kafka (Message Bus)"
+    kubectl create namespace kafka 2>/dev/null || true
     kubectl apply -f ./kafka/kafka.yaml --namespace kafka >/dev/null
     kubectl apply -f ./kafka/kafka-ui.yaml --namespace kafka >/dev/null
     # Wait for Kafka Broker StatefulSet and UI Deployment
@@ -343,6 +681,7 @@ function start_ordered() {
     # Stage 1.6: Vector (Log Shipper)
     # ────────────────────────────────────────────────────────────────
     log_stage "Stage 1.6: Vector (Log Shipping)"
+    kubectl create namespace vector 2>/dev/null || true
     kubectl apply -f ./vector/vector.yaml --namespace vector >/dev/null
     # Vector is a DaemonSet, so we wait for its pods to be ready
     log_wait "Waiting for Vector DaemonSet..."
@@ -353,6 +692,7 @@ function start_ordered() {
     # Stage 2: Nessie + Spark Operator (parallel, both need MinIO)
     # ────────────────────────────────────────────────────────────────
     log_stage "Stage 2: Nessie + Spark Operator (parallel)"
+    ensure_spark_image
 
     scale_ns nessie 1
     scale_ns spark 1
@@ -545,28 +885,78 @@ function stop_workloads() {
     fi
 }
 
+# ── Purge (Full runtime reset) ────────────────────────────────────────────────
+function purge_runtime() {
+    if ! confirm_destructive "WARNING: This will delete project Helm releases, kubectl-managed resources, namespaces, PVCs, and PVs. Git files and local source changes are not touched." "$@"; then
+        echo "Purge cancelled."
+        return 0
+    fi
+
+    log_stage "Purging Project Runtime"
+
+    log_wait "Uninstalling Helm releases..."
+    for entry in "${RELEASES[@]}"; do
+        IFS=":" read -r release namespace chart values <<< "$entry"
+        helm uninstall "$release" -n "$namespace" >/dev/null 2>&1 || true
+    done
+
+    log_wait "Deleting kubectl-managed project resources..."
+    kubectl delete -f ./spark/spark-thrift-server.yaml --ignore-not-found >/dev/null 2>&1 || true
+    kubectl delete -f ./flink/flink.yaml --ignore-not-found >/dev/null 2>&1 || true
+    kubectl delete -f ./kafka/kafka-ui.yaml -n kafka --ignore-not-found >/dev/null 2>&1 || true
+    kubectl delete -f ./kafka/kafka.yaml -n kafka --ignore-not-found >/dev/null 2>&1 || true
+    kubectl delete -f ./vector/vector.yaml -n vector --ignore-not-found >/dev/null 2>&1 || true
+    kubectl delete sparkapplications --all -n spark >/dev/null 2>&1 || true
+
+    log_wait "Deleting project namespaces..."
+    for ns in "${NAMESPACES[@]}"; do
+        kubectl delete namespace "$ns" --ignore-not-found --wait=false >/dev/null 2>&1 || true
+    done
+
+    log_wait "Waiting for namespaces to terminate..."
+    for ns in "${NAMESPACES[@]}"; do
+        for _retry in {1..60}; do
+            if ! kubectl get namespace "$ns" >/dev/null 2>&1; then
+                break
+            fi
+            sleep 2
+        done
+        if kubectl get namespace "$ns" >/dev/null 2>&1; then
+            force_finalize_namespace "$ns"
+            for _retry in {1..15}; do
+                if ! kubectl get namespace "$ns" >/dev/null 2>&1; then
+                    break
+                fi
+                sleep 2
+            done
+            if kubectl get namespace "$ns" >/dev/null 2>&1; then
+                log_err "Namespace $ns is still terminating after force-finalize."
+                return 1
+            fi
+        fi
+    done
+
+    log_wait "Removing project persistent volumes..."
+    kubectl delete pv --all >/dev/null 2>&1 || true
+
+    log_ok "Project runtime purge complete."
+}
+
 # ── Deploy (Helm install/upgrade) ──────────────────────────────────────────────
 function deploy_charts() {
     local target_release="$1"  # Optional: specific release name (e.g., "keda", "airflow")
+    shift || true
 
     if [[ -z "$target_release" ]]; then
-        echo -e "${C_RED}WARNING: This will UNINSTALL and RE-INSTALL all project components.${C_RESET}"
-        echo "This may result in data loss if volumes are not persistent. Continue? (y/n)"
-        read -r confirm
-        if [[ "$confirm" != "y" && "$confirm" != "Y" ]]; then
+        if ! confirm_destructive "WARNING: This will UNINSTALL and RE-INSTALL all project components. This may result in data loss if volumes are not persistent." "$@"; then
             echo "Deployment cancelled."
-            return
+            return 0
         fi
     else
         echo -e "${C_YELLOW}Deploying only: $target_release${C_RESET}"
     fi
 
-    # Ensure mandatory Helm repositories are present
-    echo -e "\n${C_BLUE}>>> Updating Helm repositories... <<<${C_RESET}"
-    helm repo add kedacore https://kedacore.github.io/charts --quiet 2>/dev/null || true
-    helm repo add spark-operator https://googlecloudplatform.github.io/spark-on-k8s-operator --quiet 2>/dev/null || true
-    helm repo add prometheus-community https://prometheus-community.github.io/helm-charts --quiet 2>/dev/null || true
-    helm repo update >/dev/null
+    update_helm_repos
 
     # kafka is deployed via kubectl apply, not Helm
     if [[ "$target_release" == "kafka" || "$target_release" == "kafka-ui" ]]; then
@@ -593,6 +983,9 @@ function deploy_charts() {
         echo -e "Deployment complete. Run './manage-project.sh start flink' to bring Flink up."
         return
     fi
+    if [[ "$target_release" == "spark-operator" ]]; then
+        ensure_spark_image
+    fi
 
     for entry in "${RELEASES[@]}"; do
         IFS=":" read -r release namespace chart values <<< "$entry"
@@ -614,6 +1007,10 @@ function deploy_charts() {
         
         # Create a temporary local values file for dynamic path injection
         case "$release" in
+            keda)
+                helm upgrade --install "$release" "$chart" -n "$namespace" --skip-crds --set crds.install=false
+                ensure_keda_scaledobject_crd
+                ;;
             airflow)
                 log_wait "Injecting local paths into $release..."
                 sed "s|/path/to/project/airflow/dags|$PROJECT_ROOT/airflow/dags|g" "$values" > "${values}.tmp"
@@ -621,9 +1018,11 @@ function deploy_charts() {
                 rm -f "${values}.tmp"
                 ;;
             spark-operator)
-                # Pin to 2.3.0 due to compatibility issues with 2.4.0
                 helm upgrade --install "$release" "$chart" \
-                    -n "$namespace" -f "$values" --set webhook.enable=true --version 2.3.0
+                    -n "$namespace" -f "$values" --set webhook.enable=true --skip-crds
+                ;;
+            prometheus)
+                helm upgrade --install "$release" "$chart" -n "$namespace" -f "$values" --skip-crds --set crds.enabled=false
                 ;;
             *)
                 helm upgrade --install "$release" "$chart" -n "$namespace" -f "$values"
@@ -640,6 +1039,242 @@ function deploy_charts() {
     fi
 
     echo -e "\n${C_GREEN}Deployment complete. Run './manage-project.sh start' to bring services up.${C_RESET}"
+}
+
+# ── Validation ────────────────────────────────────────────────────────────────
+function validate_integration() {
+    log_stage "Integration Validation"
+
+    check_required_crds
+
+    log_wait "Checking project pods..."
+    local bad_pods
+    bad_pods=$(kubectl get pods -A 2>/dev/null | awk '
+        NR > 1 && $1 ~ /^(keda|airflow|minio|nessie|spark|flink|superset|trino|monitoring|kafka|vector|hive-metastore)$/ && $4 != "Running" && $4 != "Completed" {print}
+    ')
+    if [[ -n "$bad_pods" ]]; then
+        log_err "Some project pods are not Running/Completed:"
+        echo "$bad_pods"
+        return 1
+    fi
+    log_ok "All project pods are Running or Completed."
+
+    log_wait "Checking Spark sample restore state..."
+    local spark_state
+    spark_state=$(kubectl get sparkapplication iceberg-nessie-restore -n spark -o jsonpath='{.status.applicationState.state}' 2>/dev/null || true)
+    if [[ "$spark_state" != "COMPLETED" ]]; then
+        log_err "Spark restore state is '$spark_state' (expected COMPLETED)."
+        return 1
+    fi
+    log_ok "Spark restore completed."
+
+    log_wait "Checking Nessie local MinIO catalog settings..."
+    local nessie_config
+    nessie_config=$(kubectl get cm -n nessie nessie -o jsonpath='{.data.application\.properties}' 2>/dev/null || true)
+    if ! grep -q 'nessie.catalog.warehouses."local".location=s3://iceberg-data/' <<< "$nessie_config"; then
+        log_err "Nessie warehouse is not configured as s3://iceberg-data/."
+        return 1
+    fi
+    if ! grep -q 'nessie.catalog.service.s3.default-options.request-signing-enabled=false' <<< "$nessie_config"; then
+        log_err "Nessie S3 request signing is not disabled for local MinIO."
+        return 1
+    fi
+    log_ok "Nessie catalog settings are aligned."
+
+    log_wait "Checking Trino Iceberg queries..."
+    local counts log_count
+    counts=$(kubectl exec -n trino deploy/trino -- trino --execute \
+        "SELECT count(*) FROM iceberg.ecommerce.customers; SELECT count(*) FROM iceberg.logs.k8s_logs_bronze" 2>/dev/null || true)
+    if ! grep -q '"15"' <<< "$counts"; then
+        log_err "Trino customer count validation failed."
+        echo "$counts"
+        return 1
+    fi
+    log_count=$(tail -n 1 <<< "$counts" | tr -d '"')
+    if ! [[ "$log_count" =~ ^[0-9]+$ ]]; then
+        log_err "Trino log table count validation failed."
+        echo "$counts"
+        return 1
+    fi
+    log_ok "Trino Iceberg queries succeeded."
+
+    log_wait "Checking Flink streaming job..."
+    local flink_overview
+    flink_overview=$(curl -sS http://localhost:8081/jobs/overview 2>/dev/null || true)
+    if ! grep -q '"state":"RUNNING"' <<< "$flink_overview" || ! grep -q '"running":2' <<< "$flink_overview" || ! grep -q '"failed":0' <<< "$flink_overview"; then
+        log_err "Flink job is not healthy."
+        echo "$flink_overview"
+        return 1
+    fi
+    log_ok "Flink job is RUNNING with 2/2 tasks and 0 failed tasks."
+
+    log_ok "Integration validation passed."
+}
+
+function require_http_check() {
+    local label=$1
+    local url=$2
+    local expected=${3:-}
+    local response
+
+    response=$(curl -fsSL --max-time 15 "$url")
+    if [[ -n "$expected" ]] && ! grep -q "$expected" <<< "$response"; then
+        log_err "$label response did not contain expected marker: $expected"
+        return 1
+    fi
+    log_ok "$label is reachable."
+}
+
+function test_component_uis() {
+    log_stage "Functional Test: Component Web UIs"
+
+    require_http_check "Airflow API/UI" "http://localhost:8080/api/v2/version" '"version"'
+    require_http_check "Superset UI" "http://localhost:8088/health" "OK"
+    require_http_check "Flink UI" "http://localhost:8081/overview" '"flink-version"'
+    require_http_check "Trino UI/API" "http://localhost:18080/v1/info" '"state":"ACTIVE"'
+    require_http_check "MinIO API" "http://localhost:9000/minio/health/live"
+    require_http_check "MinIO Console" "http://localhost:9001/" "<html"
+    require_http_check "Kafka UI" "http://localhost:9080/" "<html"
+    require_http_check "Spark Thrift UI" "http://localhost:4040/" "<html"
+    require_http_check "Grafana UI/API" "http://localhost:3000/api/health" '"database": "ok"'
+
+    log_wait "Checking Nessie API from inside the cluster..."
+    if ! kubectl exec -n nessie deploy/nessie -- \
+        sh -c 'curl -fsSL http://localhost:19120/api/v2/config' | grep -q '"defaultBranch"'; then
+        log_err "Nessie API check failed."
+        return 1
+    fi
+    log_ok "Nessie API is reachable."
+}
+
+function test_airflow_global_view_dag() {
+    log_stage "Functional Test: Airflow Global Temp View DAG"
+
+    local dag_id="spark_global_temp_view_vs_airflow_internal_test"
+    local run_id="manual__smoke_$(date +%Y%m%dT%H%M%S)"
+    local state
+
+    log_wait "Triggering Airflow DAG: $dag_id ($run_id)"
+    kubectl exec -n airflow deploy/airflow-api-server -- airflow dags unpause "$dag_id" >/dev/null
+    kubectl exec -n airflow deploy/airflow-api-server -- airflow dags trigger "$dag_id" --run-id "$run_id" >/dev/null
+
+    for _retry in {1..60}; do
+        state=$(kubectl exec -n airflow deploy/airflow-api-server -- airflow dags state "$dag_id" "$run_id" 2>/dev/null \
+            | tail -n 1 | tr -d '[:space:]')
+        log_info "Airflow DAG state: ${state:-unknown}"
+        if [[ "$state" == "success" ]]; then
+            log_ok "Airflow global temp view DAG succeeded."
+            return 0
+        fi
+        if [[ "$state" == "failed" ]]; then
+            log_err "Airflow global temp view DAG failed."
+            return 1
+        fi
+        sleep 10
+    done
+
+    log_err "Airflow global temp view DAG did not finish within timeout."
+    return 1
+}
+
+function test_trino_view() {
+    log_stage "Functional Test: Trino View"
+
+    local view_name="iceberg.ecommerce.smoke_customer_count_view"
+    local output
+    output=$(kubectl exec -n trino deploy/trino -- trino --execute "
+        DROP VIEW IF EXISTS ${view_name};
+        CREATE VIEW ${view_name} AS
+            SELECT count(*) AS customer_count
+            FROM iceberg.ecommerce.customers;
+        SELECT customer_count FROM ${view_name};
+        DROP VIEW ${view_name};
+    " 2>/dev/null)
+
+    if ! grep -q '"15"' <<< "$output"; then
+        log_err "Trino view test failed."
+        echo "$output"
+        return 1
+    fi
+
+    log_ok "Trino view create/query/drop succeeded."
+}
+
+function test_spark_pipeline_query() {
+    log_stage "Functional Test: Spark Pipeline Query"
+
+    local output
+    output=$(kubectl exec -n spark deploy/spark-thrift-server -- \
+        /opt/spark/bin/beeline -u jdbc:hive2://localhost:10000 \
+        -e "SELECT count(*) AS customer_count FROM iceberg.ecommerce.customers" 2>&1)
+
+    if ! grep -q "| 15" <<< "$output"; then
+        log_err "Spark pipeline query test failed."
+        echo "$output"
+        return 1
+    fi
+
+    log_ok "Spark pipeline query succeeded."
+}
+
+function run_functional_test() {
+    local target=${1:-all}
+
+    case "$target" in
+        all)
+            validate_integration
+            test_component_uis
+            test_airflow_global_view_dag
+            test_trino_view
+            test_spark_pipeline_query
+            ;;
+        ui|web-ui)
+            test_component_uis
+            ;;
+        airflow-global-view|airflow-dag)
+            test_airflow_global_view_dag
+            ;;
+        trino-view)
+            test_trino_view
+            ;;
+        spark-query|spark-pipeline-query)
+            test_spark_pipeline_query
+            ;;
+        data|validate)
+            validate_integration
+            ;;
+        *)
+            log_err "Unknown test target: $target"
+            echo "Available tests: all, ui, airflow-global-view, trino-view, spark-query, data"
+            return 1
+            ;;
+    esac
+}
+
+function run_integration_test() {
+    if ! confirm_destructive "WARNING: Integration test will purge the local project runtime, rebuild custom images, redeploy everything, and start the full platform." "$@"; then
+        echo "Integration test cancelled."
+        return 0
+    fi
+
+    purge_runtime --yes
+    rebuild_local_images "$@"
+    deploy_charts "" --yes
+    start_ordered
+    validate_integration
+}
+
+function provision_environment() {
+    if ! confirm_destructive "WARNING: Provision will bootstrap prerequisites, rebuild custom images, deploy all components, start the full platform, and validate it." "$@"; then
+        echo "Provision cancelled."
+        return 0
+    fi
+
+    bootstrap_environment
+    rebuild_local_images "$@"
+    deploy_charts "" --yes
+    start_ordered
+    validate_integration
 }
 
 # ── Main ───────────────────────────────────────────────────────────────────────
@@ -664,8 +1299,40 @@ case "${1:-}" in
             done
         fi
         ;;
+    doctor)
+        doctor_environment
+        ;;
+    bootstrap)
+        bootstrap_environment
+        ;;
     deploy)
-        deploy_charts "${2:-}"  # Pass optional second argument (specific release name)
+        if [[ "${2:-}" == "--yes" ]]; then
+            deploy_charts "" "${@:2}"
+        else
+            deploy_charts "${2:-}" "${@:3}"  # Pass optional second argument (specific release name)
+        fi
+        ;;
+    purge)
+        purge_runtime "${@:2}"
+        ;;
+    rebuild-images)
+        rebuild_local_images "${@:2}"
+        ;;
+    validate)
+        validate_integration
+        exit $?
+        ;;
+    test)
+        run_functional_test "${2:-all}"
+        exit $?
+        ;;
+    provision)
+        provision_environment "${@:2}"
+        exit $?
+        ;;
+    integration-test)
+        run_integration_test "${@:2}"
+        exit $?
         ;;
     shutdown)
         echo "Are you sure you want to stop the entire OrbStack engine? (y/n)"
@@ -677,7 +1344,7 @@ case "${1:-}" in
         fi
         ;;
     *)
-        echo "Usage: $0 {start|stop|status|deploy [name]|shutdown}"
+        echo "Usage: $0 {start|stop|status|doctor|bootstrap|deploy [name]|purge|rebuild-images|validate|test [name]|provision|integration-test|shutdown}"
         echo ""
         echo "Examples:"
         echo "  $0 start            # Start all"
@@ -685,6 +1352,17 @@ case "${1:-}" in
         echo "  $0 start superset   # Start only Superset"
         echo "  $0 stop airflow     # Stop only Airflow"
         echo "  $0 status trino     # Status of Trino"
+        echo "  $0 doctor           # Check local tools, cluster access, and required files"
+        echo "  $0 bootstrap        # Prepare Helm repos, namespaces, chart deps, and CRDs"
+        echo "  $0 purge --yes      # Delete project runtime resources"
+        echo "  $0 rebuild-images --no-cache"
+        echo "  $0 test ui"
+        echo "  $0 test airflow-global-view"
+        echo "  $0 test trino-view"
+        echo "  $0 test spark-query"
+        echo "  $0 test all"
+        echo "  $0 provision --yes --no-cache"
+        echo "  $0 integration-test --yes --no-cache"
         exit 1
         ;;
 esac

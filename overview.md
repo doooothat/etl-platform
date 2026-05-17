@@ -27,11 +27,13 @@ graph TD
     subgraph Analysis_Processing [Processing Layer]
         Trino[Trino Engine]
         SparkThrift[Spark Thrift Server]
+        EphemeralSparkThrift[DAG-Scoped Spark Thrift Server]
         Trino -- "Query Engine" --> MinIO
         Trino -- "Metadata" --> Nessie
         Trino -- "hive catalog views" --> HiveMS
         Trino -- "iceberg_hms materialized views" --> HiveMS
         SparkThrift -- "Hive client" --> HiveMS
+        EphemeralSparkThrift -- "Per-DAG temp views" --> HiveMS
     end
 
     subgraph UX_Orchestration [Orchestration & UI]
@@ -41,6 +43,7 @@ graph TD
         Grafana[Grafana Monitoring]
         
         Airflow -- "Spark Job" --> SparkThrift
+        Airflow -- "Create / use / cleanup per DAG run" --> EphemeralSparkThrift
         Superset -- "SQL Lab" --> Trino
         KafkaUI -- "Manage" --> Kafka
     end
@@ -54,6 +57,7 @@ graph TD
 | :--- | :--- | :--- | :--- | :--- |
 | **Airflow** | Workflow Mgmt | `airflow-webserver.airflow.svc` | 8080 | [http://localhost:8080](http://localhost:8080) |
 | **Spark STS** | SQL ETL/Load | `spark-thrift-server.spark.svc` | 10000 | `jdbc:hive2://localhost:10000` |
+| **DAG-Scoped Spark STS** | Per-DAG Spark SQL state | `ests-<run-ts>.spark.svc` | 10000 | Internal only |
 | **Trino** | Fast Query Engine | `trino.trino.svc` | 8080 | [http://localhost:18080](http://localhost:18080) |
 | **Flink** | Streaming Processor | `flink-jobmanager.flink.svc` | 8081 | [http://localhost:8081](http://localhost:8081) |
 | **Kafka UI** | Message Monitoring| `kafka-ui.kafka.svc` | 9080 | [http://localhost:9080](http://localhost:9080) |
@@ -130,6 +134,7 @@ The platform now includes a production-grade log collection pipeline:
     - **Reasoning**: Ensures the local M4 host machine doesn't run out of disk space while providing enough data for stream processing testing.
 - **Apache Flink (Local Streaming Bridge)**: Runs a single JobManager and TaskManager with no PVC. It reads `k8s_logs` from Kafka and appends raw events to the Iceberg bronze table `iceberg.logs.k8s_logs_bronze`.
 - **Flink SQL Source**: The streaming job SQL is stored at `flink/sql/k8s_logs_to_iceberg.sql`. `manage-project.sh` syncs it into the `flink-k8s-logs-sql` ConfigMap before submitting the runner job, so query logic can be reviewed without editing Kubernetes YAML.
+- **Deterministic Local Restart**: `./manage-project.sh start flink` cancels existing local Flink jobs and removes local `/tmp/flink-checkpoints` before resubmitting. This avoids replaying stale checkpoint metadata after the in-memory Nessie catalog or MinIO data is reset.
 - **Kafka UI**: Provides a visual interface to browse topics (`k8s_logs`) and inspect JSON payloads.
 
 ---
@@ -160,7 +165,113 @@ Iceberg -> Spark/Airflow/dbt -> Iceberg mart/gold for batch refinement
 
 ---
 
-## ⚡ 6. Infra & Data Management (`manage-project.sh`)
+## ⚙️ 6. Runtime Versions & Consistency
+
+The intended local runtime matrix is maintained in [`versions.yaml`](./versions.yaml). Current live local cluster versions observed on 2026-05-17:
+
+| Component | Live Runtime |
+| :--- | :--- |
+| Airflow | `apache/airflow:3.0.2` |
+| Spark runtime | `custom-spark:4.0.2-nessie` |
+| Spark Operator pod image | `ghcr.io/kubeflow/spark-operator/controller:2.4.0` |
+| Trino | `trinodb/trino:480` |
+| Nessie | `ghcr.io/projectnessie/nessie:0.107.4` |
+| Hive Metastore | `apache/hive:4.0.0` |
+| Flink | `custom-flink:1.20.3-iceberg` |
+| Kafka | `apache/kafka:3.9.0` |
+| Superset | `apache/superset:5.0.0` |
+| Vector | `timberio/vector:0.34.1-distroless-libc` |
+| MinIO | `quay.io/minio/minio:RELEASE.2024-12-18T13-15-44Z` |
+
+Version findings:
+
+- Spark is consistently built and tested around Spark 4.0.2, Iceberg Spark runtime `4.0_2.13:1.10.1`, and the custom `custom-spark:4.0.2-nessie` image.
+- Airflow PostgreSQL, Superset PostgreSQL, and the Hive Metastore PostgreSQL client are now pinned to the same PostgreSQL `18.3` digest in repository manifests.
+- Trino stale references were aligned to Trino 480, and Kafka references were aligned around Kafka 3.9.0.
+- Kafka UI and the Airflow kubectl helper were moved off `latest` tags.
+- `manage-project.sh` builds missing local custom Spark and Flink images, so a fresh clone on the same local container/K8s environment can reconstruct those runtime images.
+- Nessie REST catalog uses `s3://iceberg-data/` as the warehouse URI and has S3 request signing disabled for the local MinIO path. Spark, Flink, and Trino all provide explicit local MinIO credentials instead of relying on Nessie remote signing.
+- The running Spark binary reports Spark 4.0.2. One completed SparkApplication driver still had mixed Kubernetes labels, `spark-version=4.0.0` and `version=4.0.2`, so labels need cleanup before they are used for audits.
+- Nessie is aligned to `0.107.4` in repo values, chart metadata, and the live local pod after the 2026-05-17 redeploy.
+- Redis cannot be fully collapsed into one image family without chart risk: Airflow uses the official Redis image and Superset uses Bitnami Redis. Both are explicitly pinned.
+- The Superset websocket component is disabled and not part of the rendered local system; its community image default is pinned by digest before enabling that optional component.
+
+---
+
+## 🧪 7. Airflow DAG-Scoped Spark SQL Runtime
+
+Airflow tasks that use independent Spark submissions do not share Spark temporary views because each task normally creates a separate Spark application.
+
+For workflows that need task-level retry boundaries and shared Spark SQL state, the validated pattern is:
+
+```mermaid
+flowchart LR
+    A["Airflow DAG Run"] --> B["start_spark_runtime"]
+    B --> C["DAG-scoped Spark Thrift Server"]
+    C --> D["create_base_view task"]
+    C --> E["create_derived_view task"]
+    C --> F["other SQL tasks"]
+    F --> G["cleanup_spark_runtime"]
+    C --> H["Spark Driver"]
+    H --> I["Dynamic Executors"]
+```
+
+Properties:
+
+- The always-on shared `spark-thrift-server.spark.svc` is not used.
+- A per-run service such as `ests-20260517t052000.spark.svc.cluster.local:10000` is created.
+- SQL tasks connect to that same per-run JDBC endpoint.
+- `global_temp` views and cached tables are shared because the Spark driver remains alive.
+- Executor dynamic allocation is enabled with `initialExecutors=0`, `minExecutors=0`, and a bounded `maxExecutors`.
+- Cleanup deletes the per-run deployment, service, and executor pods.
+
+Validated result:
+
+```text
+base_rows = 3
+total_with_tax = 825.0
+DAG state = success
+```
+
+See `airflow/dags/ephemeral_spark_thrift_dynamic_allocation_template.py` and `study/study-2026-05-17-airflow-dag-scoped-spark-thrift-server.md`.
+
+---
+
+## ⚡ 8. Infra & Data Management (`manage-project.sh`)
+
+### First-Time Local Provisioning
+
+For a third-party clone on the same Mac + local Kubernetes toolchain, the intended setup path is:
+
+```bash
+cp env.example local.env
+# Set PROJECT_ROOT in local.env to the absolute clone path.
+
+./manage-project.sh doctor
+./manage-project.sh bootstrap
+./manage-project.sh provision --yes --no-cache
+```
+
+Command responsibilities:
+
+| Command | Purpose |
+| :--- | :--- |
+| `doctor` | Verifies required CLI tools (`kubectl`, `helm`, `docker`, `curl`, `jq`, and POSIX helpers), Docker daemon, Kubernetes connectivity, host architecture, and required repository files. |
+| `bootstrap` | Prepares Helm repos, chart dependencies, namespaces, and required Spark/KEDA/Prometheus CRDs. |
+| `provision` | Runs bootstrap, rebuilds local custom images, deploys all components, starts the platform, and validates it. |
+| `validate` | Checks CRDs, pod health, Spark sample restore, Nessie catalog settings, Trino queries, and Flink job health. |
+| `test ui` | Checks local Web UI/API endpoints for Airflow, Superset, Flink, Trino, MinIO, Kafka UI, Spark UI, Grafana, and Nessie. |
+| `test airflow-global-view` | Triggers the Airflow DAG that verifies Spark Thrift Server global temp view sharing across Airflow tasks. |
+| `test trino-view` | Creates, queries, and drops a Trino view over the Iceberg customer table. |
+| `test spark-query` | Runs a Spark Thrift Server query against the restored Iceberg customer table. |
+| `test all` | Runs `validate` plus all functional smoke tests above. |
+| `integration-test` | Destructive cold-start test: purges project runtime, rebuilds local images, redeploys, starts, and validates. |
+
+`integration-test --yes --no-cache` is intended for a project-dedicated local cluster. It deletes project namespaces and all Kubernetes PVs in the current cluster, so do not run it on a shared local cluster. If a namespace remains stuck in `Terminating`, purge force-finalizes it after the normal wait window.
+
+CRDs are not deleted during purge. They are cluster-wide API type definitions, and `bootstrap` is responsible for ensuring the required CRDs exist before deployment.
+
+Nessie depends on MinIO credentials in its own namespace. Ordered startup now copies the MinIO chart secret into the Nessie namespace as `minio-creds` immediately after creating the `iceberg-data` bucket.
 
 ### 🔄 Sequential Startup Logic
 1.  **Stage 0**: KEDA (Autoscaler)
@@ -174,7 +285,7 @@ Iceberg -> Spark/Airflow/dbt -> Iceberg mart/gold for batch refinement
 
 ---
 
-## 🧪 7. Common Local Checks
+## 🧪 9. Common Local Checks
 
 ```bash
 # Start or resubmit only the local Flink streaming bridge
@@ -196,10 +307,11 @@ Because the local policy is no PVC, stopping OrbStack or wiping the platform rem
 
 ---
 
-## 📝 8. Operational Study Notes
+## 📝 10. Operational Study Notes
 For a deep dive into the technical challenges faced during infrastructure setup (e.g., KRaft mode configuration, ARM64 image issues), refer to the study documents in:
 - `study/study-2026-04-20-kafka-infrastructure-troubleshooting.md`
 - `study/study-2026-05-15-hive-metastore-trino-view-store.md`
 - `study/study-2026-05-16-todo-materialized-view-trino-iceberg-nessie.md`
+- `study/study-2026-05-17-airflow-dag-scoped-spark-thrift-server.md`
 
 > **Note**: Kafka, Redis, app DBs, and the Hive Metastore backing DB are local-development ephemeral services. Permanent Lakehouse storage is represented by the MinIO S3 layer plus Iceberg metadata through Nessie or Hive Metastore, depending on catalog.
