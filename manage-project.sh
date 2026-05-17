@@ -29,6 +29,7 @@ fi
 #   ./manage-project.sh purge [--yes]   - Delete project Helm releases, K8s resources, namespaces, PVs
 #   ./manage-project.sh rebuild-images [--no-cache] - Rebuild local custom Spark/Flink images
 #   ./manage-project.sh validate        - Run post-start integration checks
+#   ./manage-project.sh test [name]     - Run functional smoke tests
 #   ./manage-project.sh provision [--yes] [--no-cache] - Doctor, bootstrap, rebuild, deploy, start, validate
 #   ./manage-project.sh integration-test [--yes] [--no-cache] - Purge, rebuild, deploy, start, validate
 #   ./manage-project.sh shutdown        - Stop the entire OrbStack engine
@@ -1110,6 +1111,146 @@ function validate_integration() {
     log_ok "Integration validation passed."
 }
 
+function require_http_check() {
+    local label=$1
+    local url=$2
+    local expected=${3:-}
+    local response
+
+    response=$(curl -fsSL --max-time 15 "$url")
+    if [[ -n "$expected" ]] && ! grep -q "$expected" <<< "$response"; then
+        log_err "$label response did not contain expected marker: $expected"
+        return 1
+    fi
+    log_ok "$label is reachable."
+}
+
+function test_component_uis() {
+    log_stage "Functional Test: Component Web UIs"
+
+    require_http_check "Airflow API/UI" "http://localhost:8080/api/v2/version" '"version"'
+    require_http_check "Superset UI" "http://localhost:8088/health" "OK"
+    require_http_check "Flink UI" "http://localhost:8081/overview" '"flink-version"'
+    require_http_check "Trino UI/API" "http://localhost:18080/v1/info" '"state":"ACTIVE"'
+    require_http_check "MinIO API" "http://localhost:9000/minio/health/live"
+    require_http_check "MinIO Console" "http://localhost:9001/" "<html"
+    require_http_check "Kafka UI" "http://localhost:9080/" "<html"
+    require_http_check "Spark Thrift UI" "http://localhost:4040/" "<html"
+    require_http_check "Grafana UI/API" "http://localhost:3000/api/health" '"database": "ok"'
+
+    log_wait "Checking Nessie API from inside the cluster..."
+    if ! kubectl exec -n nessie deploy/nessie -- \
+        sh -c 'curl -fsSL http://localhost:19120/api/v2/config' | grep -q '"defaultBranch"'; then
+        log_err "Nessie API check failed."
+        return 1
+    fi
+    log_ok "Nessie API is reachable."
+}
+
+function test_airflow_global_view_dag() {
+    log_stage "Functional Test: Airflow Global Temp View DAG"
+
+    local dag_id="spark_global_temp_view_vs_airflow_internal_test"
+    local run_id="manual__smoke_$(date +%Y%m%dT%H%M%S)"
+    local state
+
+    log_wait "Triggering Airflow DAG: $dag_id ($run_id)"
+    kubectl exec -n airflow deploy/airflow-api-server -- airflow dags unpause "$dag_id" >/dev/null
+    kubectl exec -n airflow deploy/airflow-api-server -- airflow dags trigger "$dag_id" --run-id "$run_id" >/dev/null
+
+    for _retry in {1..60}; do
+        state=$(kubectl exec -n airflow deploy/airflow-api-server -- airflow dags state "$dag_id" "$run_id" 2>/dev/null \
+            | tail -n 1 | tr -d '[:space:]')
+        log_info "Airflow DAG state: ${state:-unknown}"
+        if [[ "$state" == "success" ]]; then
+            log_ok "Airflow global temp view DAG succeeded."
+            return 0
+        fi
+        if [[ "$state" == "failed" ]]; then
+            log_err "Airflow global temp view DAG failed."
+            return 1
+        fi
+        sleep 10
+    done
+
+    log_err "Airflow global temp view DAG did not finish within timeout."
+    return 1
+}
+
+function test_trino_view() {
+    log_stage "Functional Test: Trino View"
+
+    local view_name="iceberg.ecommerce.smoke_customer_count_view"
+    local output
+    output=$(kubectl exec -n trino deploy/trino -- trino --execute "
+        DROP VIEW IF EXISTS ${view_name};
+        CREATE VIEW ${view_name} AS
+            SELECT count(*) AS customer_count
+            FROM iceberg.ecommerce.customers;
+        SELECT customer_count FROM ${view_name};
+        DROP VIEW ${view_name};
+    " 2>/dev/null)
+
+    if ! grep -q '"15"' <<< "$output"; then
+        log_err "Trino view test failed."
+        echo "$output"
+        return 1
+    fi
+
+    log_ok "Trino view create/query/drop succeeded."
+}
+
+function test_spark_pipeline_query() {
+    log_stage "Functional Test: Spark Pipeline Query"
+
+    local output
+    output=$(kubectl exec -n spark deploy/spark-thrift-server -- \
+        /opt/spark/bin/beeline -u jdbc:hive2://localhost:10000 \
+        -e "SELECT count(*) AS customer_count FROM iceberg.ecommerce.customers" 2>&1)
+
+    if ! grep -q "| 15" <<< "$output"; then
+        log_err "Spark pipeline query test failed."
+        echo "$output"
+        return 1
+    fi
+
+    log_ok "Spark pipeline query succeeded."
+}
+
+function run_functional_test() {
+    local target=${1:-all}
+
+    case "$target" in
+        all)
+            validate_integration
+            test_component_uis
+            test_airflow_global_view_dag
+            test_trino_view
+            test_spark_pipeline_query
+            ;;
+        ui|web-ui)
+            test_component_uis
+            ;;
+        airflow-global-view|airflow-dag)
+            test_airflow_global_view_dag
+            ;;
+        trino-view)
+            test_trino_view
+            ;;
+        spark-query|spark-pipeline-query)
+            test_spark_pipeline_query
+            ;;
+        data|validate)
+            validate_integration
+            ;;
+        *)
+            log_err "Unknown test target: $target"
+            echo "Available tests: all, ui, airflow-global-view, trino-view, spark-query, data"
+            return 1
+            ;;
+    esac
+}
+
 function run_integration_test() {
     if ! confirm_destructive "WARNING: Integration test will purge the local project runtime, rebuild custom images, redeploy everything, and start the full platform." "$@"; then
         echo "Integration test cancelled."
@@ -1181,6 +1322,10 @@ case "${1:-}" in
         validate_integration
         exit $?
         ;;
+    test)
+        run_functional_test "${2:-all}"
+        exit $?
+        ;;
     provision)
         provision_environment "${@:2}"
         exit $?
@@ -1199,7 +1344,7 @@ case "${1:-}" in
         fi
         ;;
     *)
-        echo "Usage: $0 {start|stop|status|doctor|bootstrap|deploy [name]|purge|rebuild-images|validate|provision|integration-test|shutdown}"
+        echo "Usage: $0 {start|stop|status|doctor|bootstrap|deploy [name]|purge|rebuild-images|validate|test [name]|provision|integration-test|shutdown}"
         echo ""
         echo "Examples:"
         echo "  $0 start            # Start all"
@@ -1211,6 +1356,11 @@ case "${1:-}" in
         echo "  $0 bootstrap        # Prepare Helm repos, namespaces, chart deps, and CRDs"
         echo "  $0 purge --yes      # Delete project runtime resources"
         echo "  $0 rebuild-images --no-cache"
+        echo "  $0 test ui"
+        echo "  $0 test airflow-global-view"
+        echo "  $0 test trino-view"
+        echo "  $0 test spark-query"
+        echo "  $0 test all"
         echo "  $0 provision --yes --no-cache"
         echo "  $0 integration-test --yes --no-cache"
         exit 1

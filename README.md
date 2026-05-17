@@ -63,6 +63,18 @@ Validate the running platform:
 ./manage-project.sh validate
 ```
 
+Run functional smoke tests by area:
+
+```bash
+./manage-project.sh test ui
+./manage-project.sh test airflow-global-view
+./manage-project.sh test trino-view
+./manage-project.sh test spark-query
+./manage-project.sh test all
+```
+
+`test all` runs the platform validation plus component UI checks, the Airflow global temp view DAG, a Trino view create/query/drop check, and a Spark Thrift pipeline query.
+
 Monitoring log flow:
 Once started, you can see real-time logs landing in Kafka via **Kafka UI**: [http://localhost:9080](http://localhost:9080)
 

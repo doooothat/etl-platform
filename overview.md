@@ -260,6 +260,11 @@ Command responsibilities:
 | `bootstrap` | Prepares Helm repos, chart dependencies, namespaces, and required Spark/KEDA/Prometheus CRDs. |
 | `provision` | Runs bootstrap, rebuilds local custom images, deploys all components, starts the platform, and validates it. |
 | `validate` | Checks CRDs, pod health, Spark sample restore, Nessie catalog settings, Trino queries, and Flink job health. |
+| `test ui` | Checks local Web UI/API endpoints for Airflow, Superset, Flink, Trino, MinIO, Kafka UI, Spark UI, Grafana, and Nessie. |
+| `test airflow-global-view` | Triggers the Airflow DAG that verifies Spark Thrift Server global temp view sharing across Airflow tasks. |
+| `test trino-view` | Creates, queries, and drops a Trino view over the Iceberg customer table. |
+| `test spark-query` | Runs a Spark Thrift Server query against the restored Iceberg customer table. |
+| `test all` | Runs `validate` plus all functional smoke tests above. |
 | `integration-test` | Destructive cold-start test: purges project runtime, rebuilds local images, redeploys, starts, and validates. |
 
 `integration-test --yes --no-cache` is intended for a project-dedicated local cluster. It deletes project namespaces and all Kubernetes PVs in the current cluster, so do not run it on a shared local cluster. If a namespace remains stuck in `Terminating`, purge force-finalizes it after the normal wait window.
